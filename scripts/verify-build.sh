@@ -1,14 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
+shopt -s nullglob
 
 source_dir="${1:-}"
 builder_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-if [[ -z "$source_dir" ]]; then
-	echo "Usage: $0 <source-directory>" >&2
-	exit 2
-fi
+[[ -n "$source_dir" ]] || { echo "Usage: $0 <source-directory>" >&2; exit 2; }
 source_dir="$(cd "$source_dir" && pwd)"
+source "$source_dir/.builder-target"
+target_dir="$source_dir/bin/targets/$TARGET/$SUBTARGET"
+manifest="$(find "$target_dir" -maxdepth 1 -name "*${PROFILE}.manifest" -print -quit)"
+if [[ -z "$manifest" ]]; then
+	manifests=("$target_dir"/*.manifest)
+	(( ${#manifests[@]} == 1 )) || {
+		echo "Could not identify the firmware manifest for profile $PROFILE" >&2
+		exit 1
+	}
+	manifest="${manifests[0]}"
+fi
 
 while IFS= read -r package; do
 	[[ -n "$package" && "$package" != \#* ]] || continue
@@ -16,22 +25,14 @@ while IFS= read -r package; do
 		echo "Required package is not enabled: $package" >&2
 		exit 1
 	}
-done < "$builder_root/configs/required-packages.txt"
-
-manifest="$(find "$source_dir/bin/targets/ramips/mt7621" -maxdepth 1 \
-	-name '*xiaoyu_xy-c5.manifest' -print -quit)"
-[[ -n "$manifest" ]]
-while IFS= read -r package; do
-	[[ -n "$package" && "$package" != \#* ]] || continue
 	grep -q "^${package} - " "$manifest" || {
 		echo "Required package is missing from firmware manifest: $package" >&2
 		exit 1
 	}
 done < "$builder_root/configs/required-packages.txt"
 
-rootfs="$(find "$source_dir/build_dir" -maxdepth 3 -type d \
-	-name 'root-ramips' -print -quit)"
-[[ -n "$rootfs" ]]
+rootfs="$(find "$source_dir/build_dir" -maxdepth 3 -type d -name 'root-*' -print | head -n 1)"
+[[ -n "$rootfs" ]] || { echo "Root filesystem staging directory not found" >&2; exit 1; }
 test -x "$rootfs/usr/libexec/extroot-sysupgrade"
 test -x "$rootfs/etc/uci-defaults/99-fanchmwrt-repositories"
 grep -Fxq '/etc/config/ddnsto' "$rootfs/lib/upgrade/keep.d/ddnsto"

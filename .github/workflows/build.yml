@@ -8,17 +8,41 @@ on:
         required: true
         default: fanchmwrt-25.12.4
         type: string
+      architecture:
+        description: Package architecture family
+        required: true
+        default: mipsel
+        type: choice
+        options:
+          - mipsel
+          - arm
+          - x86
+      target:
+        description: OpenWrt target, for example ramips, rockchip, or x86
+        required: true
+        default: ramips
+        type: string
+      subtarget:
+        description: OpenWrt subtarget, for example mt7621, armv8, or 64
+        required: true
+        default: mt7621
+        type: string
+      profile:
+        description: OpenWrt device profile, for example xiaoyu_xy-c5 or generic
+        required: true
+        default: xiaoyu_xy-c5
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: fanchmwrt-xiaoyu-c5-${{ inputs.upstream_ref }}
+  group: fanchmwrt-${{ inputs.target }}-${{ inputs.subtarget }}-${{ inputs.profile }}-${{ inputs.upstream_ref }}
   cancel-in-progress: false
 
 jobs:
   build:
-    name: Build ramips/mt7621 Xiaoyu XY-C5
+    name: Build ${{ inputs.target }}/${{ inputs.subtarget }}/${{ inputs.profile }}
     runs-on: ubuntu-22.04
     timeout-minutes: 360
 
@@ -57,7 +81,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: source/dl
-          key: fanchmwrt-dl-${{ runner.os }}-${{ hashFiles('source/feeds.conf.default', 'configs/xiaoyu-xy-c5.config') }}
+          key: fanchmwrt-dl-${{ runner.os }}-${{ hashFiles('source/feeds.conf.default', 'configs/base.config') }}
           restore-keys: |
             fanchmwrt-dl-${{ runner.os }}-
 
@@ -67,8 +91,13 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Configure Xiaoyu C5 firmware
-        run: ./scripts/configure.sh source configs/xiaoyu-xy-c5.config
+      - name: Configure requested OpenWrt profile
+        env:
+          TARGET: ${{ inputs.target }}
+          SUBTARGET: ${{ inputs.subtarget }}
+          PROFILE: ${{ inputs.profile }}
+          ARCHITECTURE: ${{ inputs.architecture }}
+        run: ./scripts/configure.sh source configs/base.config "$TARGET" "$SUBTARGET" "$PROFILE" "$ARCHITECTURE"
 
       - name: Download source packages
         working-directory: source
@@ -87,7 +116,7 @@ jobs:
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: xiaoyu-xy-c5-${{ inputs.upstream_ref }}
+          name: fanchmwrt-${{ inputs.target }}-${{ inputs.subtarget }}-${{ inputs.profile }}
           path: artifacts/
           if-no-files-found: error
 
@@ -95,7 +124,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: xiaoyu-xy-c5-build-logs
+          name: fanchmwrt-build-logs
           path: source/logs/
           if-no-files-found: ignore
 
