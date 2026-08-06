@@ -1,0 +1,101 @@
+name: Build FanchmWrt Firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: Upstream branch, tag, or full commit SHA
+        required: true
+        default: fanchmwrt-25.12.4
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fanchmwrt-xiaoyu-c5-${{ inputs.upstream_ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ramips/mt7621 Xiaoyu XY-C5
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout builder
+        uses: actions/checkout@v4
+
+      - name: Checkout upstream FanchmWrt
+        uses: actions/checkout@v4
+        with:
+          repository: fanchmwrt/fanchmwrt
+          ref: ${{ inputs.upstream_ref }}
+          path: source
+          fetch-depth: 1
+
+      - name: Record upstream commit
+        run: git -C source rev-parse HEAD
+
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libelf-dev libncurses-dev libssl-dev python3 python3-pyelftools \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget time xsltproc zstd
+
+      - name: Apply local upgrade and source customizations
+        run: ./scripts/prepare-source.sh source
+
+      - name: Cache downloads
+        uses: actions/cache@v4
+        with:
+          path: source/dl
+          key: fanchmwrt-dl-${{ runner.os }}-${{ hashFiles('source/feeds.conf.default', 'configs/xiaoyu-xy-c5.config') }}
+          restore-keys: |
+            fanchmwrt-dl-${{ runner.os }}-
+
+      - name: Update and install feeds
+        working-directory: source
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure Xiaoyu C5 firmware
+        run: ./scripts/configure.sh source configs/xiaoyu-xy-c5.config
+
+      - name: Download source packages
+        working-directory: source
+        run: make download -j"$(nproc)" V=s
+
+      - name: Compile firmware
+        working-directory: source
+        run: make -j"$(nproc)" BUILD_LOG=1 || make -j1 V=s BUILD_LOG=1
+
+      - name: Verify firmware contents
+        run: ./scripts/verify-build.sh source
+
+      - name: Collect firmware artifacts
+        run: ./scripts/collect-artifacts.sh source artifacts
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaoyu-xy-c5-${{ inputs.upstream_ref }}
+          path: artifacts/
+          if-no-files-found: error
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaoyu-xy-c5-build-logs
+          path: source/logs/
+          if-no-files-found: ignore
+

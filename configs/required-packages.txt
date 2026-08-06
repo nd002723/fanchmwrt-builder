@@ -1,0 +1,11 @@
+luci
+luci-i18n-base-zh-cn
+luci-compat
+luci-app-fwx-app-center
+luci-app-ttyd
+cfdisk
+e2fsprogs
+nano-full
+openssh-sftp-server
+extroot-sysupgrade
+

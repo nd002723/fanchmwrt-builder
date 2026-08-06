@@ -1,0 +1,28 @@
+#!/bin/sh
+
+STATE_DIR=/etc/extroot-sysupgrade
+
+[ ! -e "$STATE_DIR/phase" ] || exit 0
+
+section="$(uci -q show fstab | sed -n \
+	"s/^fstab\.\([^.=]*\)\.target='\/overlay'$/\1/p" | head -n 1)"
+[ -n "$section" ] || exit 0
+device="$(uci -q get "fstab.$section.device")"
+if [ ! -b "$device" ]; then
+	uuid="$(uci -q get "fstab.$section.uuid")"
+	device="$(block info | sed -n \
+		"s#^\([^:]*\):.* UUID=\"$uuid\".*#\1#p" | head -n 1)"
+fi
+actual="$(awk '$2 == "/overlay" { print $1; exit }' /proc/mounts)"
+if [ -n "$device" ] && [ -n "$actual" ] &&
+	[ "$(readlink -f "$device")" = "$(readlink -f "$actual")" ]; then
+	exit 0
+fi
+
+mkdir -p "$STATE_DIR" || exit 1
+printf '%s\n' "$section" > "$STATE_DIR/section" || exit 1
+printf '%s\n' prepare > "$STATE_DIR/phase" || exit 1
+logger -t extroot-sysupgrade -- \
+	"initialized migration state after sysupgrade configuration restore"
+
+exit 0

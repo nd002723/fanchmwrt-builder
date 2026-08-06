@@ -1,0 +1,18 @@
+diff --git a/package/base-files/files/sbin/sysupgrade b/package/base-files/files/sbin/sysupgrade
+--- a/package/base-files/files/sbin/sysupgrade
++++ b/package/base-files/files/sbin/sysupgrade
+@@ -12,10 +12,10 @@ COMMAND=/lib/upgrade/do_stage2
+ 
+ # File-local globals
+ ADD_PROVISIONING=0
+-SAVE_OVERLAY=0
+-SAVE_OVERLAY_PATH=
++SAVE_OVERLAY=1
++SAVE_OVERLAY_PATH=/
+ SAVE_PARTITIONS=1
+-SAVE_INSTALLED_PKGS=0
++SAVE_INSTALLED_PKGS=1
+ SKIP_UNCHANGED=0
+ CONF_IMAGE=
+ CONF_BACKUP_LIST=0
+

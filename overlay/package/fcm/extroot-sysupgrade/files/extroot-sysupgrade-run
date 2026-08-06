@@ -1,0 +1,485 @@
+#!/bin/sh
+
+STATE_DIR=/etc/extroot-sysupgrade
+MANIFEST=/etc/backup/installed_packages.txt
+MOUNT_DIR=/tmp/extroot-sysupgrade
+BACKUP_ROOT=.extroot-sysupgrade-backups
+TAG=extroot-sysupgrade
+APK_CACHE_DIR=$STATE_DIR/apk-cache
+
+log() {
+	logger -t "$TAG" -- "$*"
+	echo "$TAG: $*"
+}
+
+fail() {
+	log "ERROR: $*"
+	exit 1
+}
+
+read_state() {
+	[ -r "$STATE_DIR/$1" ] && sed -n '1p' "$STATE_DIR/$1"
+}
+
+discover_overlay_section() {
+	uci -q show fstab | sed -n \
+		"s/^fstab\.\([^.=]*\)\.target='\/overlay'$/\1/p" | head -n 1
+}
+
+configured_overlay_device() {
+	local section="$1" device uuid
+
+	device="$(uci -q get "fstab.$section.device")"
+	[ -b "$device" ] && {
+		readlink -f "$device"
+		return
+	}
+
+	uuid="$(uci -q get "fstab.$section.uuid")"
+	case "$uuid" in
+		''|*[!A-Fa-f0-9-]*) return 1;;
+	esac
+
+	block info | sed -n "s#^\([^:]*\):.* UUID=\"$uuid\".*#\1#p" | head -n 1
+}
+
+bootstrap_state() {
+	local actual device section
+
+	[ -r "$STATE_DIR/phase" ] && return 0
+	section="$(discover_overlay_section)"
+	[ -n "$section" ] || return 0
+	device="$(configured_overlay_device "$section")"
+	[ -n "$device" ] || return 0
+	actual="$(awk '$2 == "/overlay" { print $1; exit }' /proc/mounts)"
+	[ -n "$actual" ] && [ "$(readlink -f "$actual")" = "$(readlink -f "$device")" ] && return 0
+	[ -r "$MANIFEST" ] || [ "$(uci -q get "fstab.$section.enabled")" = "0" ] || return 0
+
+	mkdir -p "$STATE_DIR" || return 1
+	printf '%s\n' "$section" > "$STATE_DIR/section"
+	printf '%s\n' prepare > "$STATE_DIR/phase"
+	log "bootstrapped migration state from a legacy sysupgrade package manifest"
+}
+
+overlay_section() {
+	local section
+
+	section="$(read_state section)"
+	[ -n "$section" ] || return 1
+	uci -q get "fstab.$section.target" | grep -qx /overlay || return 1
+	printf '%s\n' "$section"
+}
+
+set_overlay_enabled() {
+	local config_dir="$1"
+	local section="$2"
+
+	if [ -n "$config_dir" ]; then
+		uci -q -c "$config_dir" set "fstab.$section.enabled=1" &&
+			uci -q -c "$config_dir" commit fstab &&
+			[ "$(uci -q -c "$config_dir" get "fstab.$section.enabled")" = "1" ]
+	else
+		uci -q set "fstab.$section.enabled=1" &&
+			uci -q commit fstab &&
+			[ "$(uci -q get "fstab.$section.enabled")" = "1" ]
+	fi
+}
+
+overlay_device() {
+	local section
+
+	section="$(overlay_section)" || return 1
+	configured_overlay_device "$section"
+}
+
+extroot_is_active() {
+	local actual expected
+
+	expected="$(overlay_device)" || return 1
+	actual="$(awk '$2 == "/overlay" { print $1; exit }' /proc/mounts)"
+	[ -n "$actual" ] || return 1
+	[ "$(readlink -f "$actual")" = "$(readlink -f "$expected")" ]
+}
+
+rollback_external() {
+	local backup_dir="$1"
+
+	[ -d "$MOUNT_DIR/upper" ] && mv "$MOUNT_DIR/upper" "$backup_dir/upper.failed"
+	[ -d "$MOUNT_DIR/work" ] && mv "$MOUNT_DIR/work" "$backup_dir/work.failed"
+	[ -d "$backup_dir/upper" ] && mv "$backup_dir/upper" "$MOUNT_DIR/upper"
+	[ -d "$backup_dir/work" ] && mv "$backup_dir/work" "$MOUNT_DIR/work"
+}
+
+cleanup_backups() {
+	local backup_dir
+
+	# Only called after extroot is active and package restoration succeeded.
+	# Keep the backup tree out of the normal overlay once migration is complete.
+	for backup_dir in "/overlay/$BACKUP_ROOT"/*; do
+		[ -d "$backup_dir" ] || continue
+		rm -rf "$backup_dir" || return 1
+	done
+	rmdir "/overlay/$BACKUP_ROOT" 2>/dev/null || true
+	rm -f "$STATE_DIR/backup"
+}
+
+ensure_package_manifest() {
+	local list old_packages old_retained package
+
+	old_packages="$1/lib/apk/packages"
+	old_retained="$1/etc/extroot-sysupgrade/package-lists"
+	mkdir -p "${MANIFEST%/*}" || return 1
+	[ -r "$MANIFEST" ] || : > "$MANIFEST" || return 1
+
+	for list in "$old_packages"/*.list "$old_retained"/*.list; do
+		[ -f "$list" ] || continue
+		package="${list##*/}"
+		package="${package%.list}"
+		case "$package" in
+			''|*[!A-Za-z0-9+_.-]*) continue;;
+		esac
+		[ -f "/rom/lib/apk/packages/$package.list" ] && continue
+		awk -v package="$package" '$1 == package { found=1 } END { exit !found }' \
+			"$MANIFEST" || printf '%s\toverlay\n' "$package" >> "$MANIFEST" || return 1
+	done
+
+	log "updated the user package manifest from the previous external upper"
+}
+
+copy_retained_init_links() {
+	local link new_upper old_upper service target
+
+	old_upper="$1"
+	new_upper="$2"
+	service="$3"
+	for link in "$old_upper/etc/rc.d"/*; do
+		[ -L "$link" ] || continue
+		target="$(readlink "$link")"
+		case "$target" in
+			../init.d/$service|/etc/init.d/$service) ;;
+			*) continue;;
+		esac
+		[ -e "/rom/etc/rc.d/${link##*/}" ] || [ -L "/rom/etc/rc.d/${link##*/}" ] || {
+			mkdir -p "$new_upper/etc/rc.d" || return 1
+			cp -a "$link" "$new_upper/etc/rc.d/${link##*/}" || return 1
+		}
+	done
+}
+
+retain_unmanifested_packages() {
+	local archive db db_package dest generated list list_dir new_upper old_lists old_retained old_upper package path retained src
+
+	old_upper="$1"
+	new_upper="$2"
+	old_lists="$old_upper/lib/apk/packages"
+	old_retained="$old_upper/etc/extroot-sysupgrade/package-lists"
+	db="$old_upper/lib/apk/db/installed"
+	list_dir="$new_upper/etc/extroot-sysupgrade/package-lists"
+	retained="$new_upper/etc/extroot-sysupgrade/retained_packages"
+	mkdir -p "$list_dir" || return 1
+	: > "$retained" || return 1
+	if [ -f "$db" ]; then
+		mkdir -p "$new_upper/etc/extroot-sysupgrade/apk-db" || return 1
+		cp -a "$db" "$new_upper/etc/extroot-sysupgrade/apk-db/installed" || return 1
+	fi
+	mkdir -p "$new_upper/etc/extroot-sysupgrade/apk-cache" || return 1
+	for archive in \
+		"$old_upper/var/cache/apk"/*.apk \
+		"$old_upper/etc/extroot-sysupgrade/apk-cache"/*.apk; do
+		[ -f "$archive" ] || continue
+		cp -a "$archive" "$new_upper/etc/extroot-sysupgrade/apk-cache/" || return 1
+	done
+	if [ -f "$old_upper/etc/config/ddnsto" ]; then
+		mkdir -p "$new_upper/etc/config" || return 1
+		cp -a "$old_upper/etc/config/ddnsto" "$new_upper/etc/config/ddnsto" || return 1
+	fi
+
+	for list in "$old_lists"/*.list "$old_retained"/*.list; do
+		[ -f "$list" ] || continue
+		package="${list##*/}"
+		package="${package%.list}"
+		case "$package" in
+			''|*[!A-Za-z0-9+_.-]*) continue;;
+		esac
+		[ -f "/rom/lib/apk/packages/$package.list" ] && continue
+		grep -Fxq "$package" "$retained" && continue
+
+		while IFS= read -r path; do
+			case "$path" in
+				/*) ;;
+				*) continue;;
+			esac
+			case "$path" in
+				/lib/apk/*|/etc/apk/*|*/../*|*/..) continue;;
+			esac
+			src="$old_upper$path"
+			dest="$new_upper$path"
+			[ -f "$src" ] || [ -L "$src" ] || continue
+			case "$path" in
+				/etc/config/*) ;;
+				*)
+					[ ! -e "/rom$path" ] && [ ! -L "/rom$path" ] || continue
+				;;
+			esac
+			mkdir -p "${dest%/*}" || return 1
+			cp -a "$src" "$dest" || return 1
+			case "$path" in
+				/etc/init.d/*)
+					copy_retained_init_links "$old_upper" "$new_upper" "${path##*/}" || return 1
+				;;
+			esac
+		done < "$list"
+
+		cp -f "$list" "$list_dir/$package.list" || return 1
+		printf '%s\n' "$package" >> "$retained" || return 1
+	done
+
+	# Runtime-installed APKs may only exist in the APK database and have no
+	# build-time /lib/apk/packages/*.list file. Reconstruct their file list
+	# without importing the old database into the active APK database.
+	if [ -f "$db" ]; then
+		for db_package in $(awk -F: '$1 == "P" { print $2 }' "$db"); do
+			package="$db_package"
+			case "$package" in
+				''|*[!A-Za-z0-9+_.-]*) continue;;
+			esac
+			[ -f "/rom/lib/apk/packages/$package.list" ] && continue
+			grep -Fxq "$package" "$retained" && continue
+			generated="$list_dir/$package.list"
+			awk -F: -v wanted="$package" '
+				$1 == "P" { active=($2 == wanted); directory=""; next }
+				!active { next }
+				$1 == "F" { directory=$0; sub(/^F:/, "", directory); next }
+				$1 == "R" {
+					file=$0; sub(/^R:/, "", file)
+					if (file == "" || file == "S") next
+					if (directory == "") print "/" file
+					else print "/" directory "/" file
+				}' "$db" | sed 's#//\+#/#g' | sort -u > "$generated" || return 1
+			[ -s "$generated" ] || { rm -f "$generated"; continue; }
+			while IFS= read -r path; do
+				case "$path" in
+					/*) ;;
+					*) continue;;
+				 esac
+				case "$path" in
+					/lib/apk/*|/etc/apk/*|*/../*|*/..) continue;;
+				 esac
+				src="$old_upper$path"
+				dest="$new_upper$path"
+				[ -f "$src" ] || [ -L "$src" ] || continue
+				case "$path" in
+					/etc/config/*) ;;
+					*) [ ! -e "/rom$path" ] && [ ! -L "/rom$path" ] || continue;;
+				 esac
+				mkdir -p "${dest%/*}" || return 1
+				cp -a "$src" "$dest" || return 1
+				case "$path" in
+					/etc/init.d/*) copy_retained_init_links "$old_upper" "$new_upper" "${path##*/}" || return 1;;
+				 esac
+			done < "$generated"
+			printf '%s\n' "$package" >> "$retained" || return 1
+		done
+	fi
+
+	sort -u "$retained" > "$retained.new" && mv "$retained.new" "$retained" || return 1
+	log "retained package files that are absent from the new firmware"
+}
+
+prepare_external_overlay() {
+	local backup_dir backup_id device section
+
+	extroot_is_active && fail "old extroot is still active; refusing to migrate a live upper directory"
+	[ -d /overlay/upper ] || fail "internal overlay upper directory is unavailable"
+	[ -d /overlay/work ] || fail "internal overlay work directory is unavailable"
+
+	section="$(overlay_section)" || fail "saved overlay mount section is invalid"
+	device="$(overlay_device)" || fail "external overlay block device was not found"
+	mkdir -p "$MOUNT_DIR" || fail "cannot create temporary mount directory"
+	mount "$device" "$MOUNT_DIR" || fail "cannot mount $device"
+
+	[ -d "$MOUNT_DIR/upper" ] || {
+		umount "$MOUNT_DIR"
+		fail "external filesystem has no extroot upper directory"
+	}
+	ensure_package_manifest "$MOUNT_DIR/upper" || {
+		umount "$MOUNT_DIR"
+		fail "cannot rebuild the installed package manifest"
+	}
+
+	backup_id="$(date +%Y%m%d-%H%M%S)-$$"
+	backup_dir="$MOUNT_DIR/$BACKUP_ROOT/$backup_id"
+	mkdir -p "$backup_dir" || {
+		umount "$MOUNT_DIR"
+		fail "cannot create external overlay backup directory"
+	}
+
+	mv "$MOUNT_DIR/upper" "$backup_dir/upper" || {
+		umount "$MOUNT_DIR"
+		fail "cannot preserve old external upper"
+	}
+	[ ! -d "$MOUNT_DIR/work" ] || mv "$MOUNT_DIR/work" "$backup_dir/work" || {
+		mv "$backup_dir/upper" "$MOUNT_DIR/upper"
+		umount "$MOUNT_DIR"
+		fail "cannot preserve old external work directory"
+	}
+	mkdir -p "$MOUNT_DIR/upper" "$MOUNT_DIR/work" || {
+		rollback_external "$backup_dir"
+		umount "$MOUNT_DIR"
+		fail "cannot create fresh external overlay directories"
+	}
+
+	set -o pipefail
+	if ! tar -C /overlay/upper -cf - . | tar -C "$MOUNT_DIR/upper" -xf -; then
+		set +o pipefail
+		rollback_external "$backup_dir"
+		umount "$MOUNT_DIR"
+		fail "cannot copy the restored configuration to external overlay"
+	fi
+	set +o pipefail
+
+	retain_unmanifested_packages "$backup_dir/upper" "$MOUNT_DIR/upper" || {
+		rollback_external "$backup_dir"
+		umount "$MOUNT_DIR"
+		fail "cannot retain packages that are absent from the new firmware"
+	}
+
+	mkdir -p "$MOUNT_DIR/upper/etc/extroot-sysupgrade" || {
+		rollback_external "$backup_dir"
+		umount "$MOUNT_DIR"
+		fail "cannot create migration state on external overlay"
+	}
+	printf '%s\n' reinstall > "$MOUNT_DIR/upper/etc/extroot-sysupgrade/phase"
+	printf '%s\n' "$BACKUP_ROOT/$backup_id" > "$MOUNT_DIR/upper/etc/extroot-sysupgrade/backup"
+
+	set_overlay_enabled "$MOUNT_DIR/upper/etc/config" "$section" || {
+		rollback_external "$backup_dir"
+		umount "$MOUNT_DIR"
+		fail "cannot enable extroot in the fresh external configuration"
+	}
+
+	sync
+	umount "$MOUNT_DIR" || fail "cannot unmount the prepared external overlay"
+
+	set_overlay_enabled "" "$section" ||
+		fail "cannot enable extroot in the internal bootstrap configuration"
+	printf '%s\n' reboot > "$STATE_DIR/phase"
+	sync
+	log "external overlay prepared; old upper saved in $BACKUP_ROOT/$backup_id"
+	log "rebooting once to activate the fresh extroot"
+	reboot
+}
+
+retry_extroot_enable() {
+	local retries section
+
+	section="$(overlay_section)" || fail "saved overlay mount section is invalid"
+	retries="$(read_state enable_retries)"
+	case "$retries" in
+		''|*[!0-9]*) retries=0;;
+	esac
+	[ "$retries" -lt 2 ] ||
+		fail "extroot did not activate after two enable retries; check block and preinit logs"
+
+	set_overlay_enabled "" "$section" || fail "cannot persist the extroot enabled flag"
+	retries=$((retries + 1))
+	printf '%s\n' "$retries" > "$STATE_DIR/enable_retries"
+	sync
+	log "extroot is enabled but not active; retrying reboot $retries of 2"
+	reboot
+}
+
+restore_packages() {
+	local archive failed need_repositories package packages repositories_available retained
+
+	extroot_is_active || fail "fresh extroot is not active; package restore was not started"
+	[ -r "$MANIFEST" ] || fail "installed package manifest is missing"
+	command -v apk >/dev/null 2>&1 || fail "apk is unavailable"
+
+	packages="$STATE_DIR/packages"
+	failed="$STATE_DIR/failed_packages"
+	retained="$STATE_DIR/retained_packages"
+	{
+		awk '$2 == "overlay" { print $1 }' "$MANIFEST"
+		[ -r "$retained" ] && cat "$retained"
+		printf '%s\n' luci-app-fwx-app-center
+	} | sort -u > "$packages"
+	: > "$failed"
+
+	need_repositories=0
+	while IFS= read -r package; do
+		[ -n "$package" ] || continue
+		apk info -e "$package" >/dev/null 2>&1 && continue
+		need_repositories=1
+		break
+	done < "$packages"
+
+	repositories_available=0
+	if [ "$need_repositories" -eq 1 ]; then
+		apk update >> "$STATE_DIR/restore.log" 2>&1 && repositories_available=1 ||
+			log "package repositories are unavailable; continuing with retained packages"
+	else
+		log "all package files are already in the firmware or retained upper"
+	fi
+
+	while IFS= read -r package; do
+		[ -n "$package" ] || continue
+		case "$package" in
+			*[!A-Za-z0-9+_.-]*)
+				echo "$package" >> "$failed"
+				continue
+			;;
+		esac
+		apk info -e "$package" >/dev/null 2>&1 && continue
+		if grep -Fxq "$package" "$retained" 2>/dev/null; then
+			if [ "$repositories_available" -eq 1 ] &&
+				apk add "$package" >> "$STATE_DIR/restore.log" 2>&1 &&
+				apk info -e "$package" >/dev/null 2>&1; then
+				log "registered retained package from the new repository: $package"
+				continue
+			fi
+			for archive in "$APK_CACHE_DIR"/"$package"-*.apk "$APK_CACHE_DIR"/"$package".apk; do
+				[ -f "$archive" ] || continue
+				if apk add --no-network --allow-untrusted "$archive" >> "$STATE_DIR/restore.log" 2>&1 &&
+					apk info -e "$package" >/dev/null 2>&1; then
+					log "registered retained package from the offline APK cache: $package"
+					break
+				fi
+			done
+		log "keeping retained package files without APK registration: $package"
+			continue
+		fi
+		[ "$repositories_available" -eq 1 ] || {
+			echo "$package" >> "$failed"
+			continue
+		}
+		log "restoring package $package"
+		apk add "$package" >> "$STATE_DIR/restore.log" 2>&1 || echo "$package" >> "$failed"
+	done < "$packages"
+
+	if [ -s "$failed" ]; then
+		log "some packages could not be restored; see $failed"
+		return 1
+	fi
+
+	cleanup_backups || log "warning: could not remove all external overlay backups"
+	printf '%s\n' complete > "$STATE_DIR/phase"
+	sync
+	log "external overlay migration and package restore completed"
+}
+
+main() {
+	local phase
+
+	bootstrap_state || fail "cannot bootstrap migration state"
+	phase="$(read_state phase)"
+	case "$phase" in
+		prepare) prepare_external_overlay;;
+		reinstall) restore_packages;;
+		reboot) retry_extroot_enable;;
+		complete|'') return 0;;
+		*) fail "unknown migration phase: $phase";;
+	esac
+}
+
+main "$@"
