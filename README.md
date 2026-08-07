@@ -23,22 +23,9 @@
 4. Bot 会先使用上游 OpenWrt 的目标元数据校验 target、subtarget、profile、架构和上游版本。审核通过后，Issue 中会出现 Actions 运行链接。
 5. 构建完成后，从运行页面下载 artifact，并根据设备类型选择对应的 sysupgrade 或安装镜像。
 
-自动构建按 UTC 日期限速：每个 GitHub 用户每天最多自动批准 1 次，全仓库每天最多自动批准 3 次。参数错误或超过限额时，Bot 会在 Issue 中说明原因；重复评论不会触发构建。
+### 参数命名
 
-格式合法但实际不存在的 target、subtarget、profile 或错误的架构组合会在预检阶段被拒绝，不进入正式编译，也不计入每日额度。预检只读取上游目标元数据，不安装 feeds、不下载软件包源码。
-
-如果过去 30 天内已经成功构建过相同设备目标和相同上游提交，并且原 artifact 仍未过期，Bot 会在新 Issue 中直接返回之前的申请和 Actions 下载链接，不重复编译，也不占用个人或全仓库的每日额度。上游分支名称相同但已经指向新提交时会视为新版本，正常进入限额检查和构建流程。
-
-## 反馈问题和建议
-
-任何 GitHub 用户都可以通过 [New Issue](https://github.com/nd002723/fanchmwrt-builder/issues/new/choose) 页面提交反馈：
-
-- 选择 `Bug 反馈`，报告固件构建、系统升级、外置挂载或内置功能的问题。
-- 选择 `功能建议`，提出设备支持、软件包、升级流程或使用体验方面的建议。
-
-请按模板提供设备型号、固件版本、复现步骤或具体使用场景，并删除日志中的密码、Token 和公网地址。Bug 反馈和功能建议只用于讨论，不会进入自动审核或固件编译任务；需要构建固件时必须选择独立的 `Firmware build` 模板。
-
-构建参数遵循 OpenWrt 命名：
+设备参数遵循 OpenWrt 命名：
 
 - `architecture`：选择 `mipsel`、`arm` 或 `x86`
 - `target`：目标平台，例如 `ramips`、`rockchip`、`x86`
@@ -46,9 +33,20 @@
 - `profile`：设备 profile，例如 `xiaoyu_xy-c5`、`friendlyarm_nanopi-r5c`、`generic`
 - `upstream_ref`：`fanchmwrt/fanchmwrt` 中存在的分支、tag 或完整提交 SHA
 
+`upstream_ref` 必须填写 GitHub 上显示的原始名称：
+
+- 使用 tag 时，填写 Tags 页面中的完整标签名，例如 `fanchmwrt-25.12.4` 或 `v25.12.4`。
+- 使用分支时，填写完整分支名，例如 `main` 或 `feature/test`。
+- 使用提交时，填写完整的 40 位 commit SHA。
+- 不要填写 GitHub 页面网址，也不要添加 `tag:`、`branch:` 或 `refs/tags/` 前缀。
+- 不要省略标签自身包含的 `v`、产品名或其他前缀；名称必须完全一致。
+
+Bot 会先把分支或 tag 解析并固定为准确的 commit SHA，再进行预检和构建。因此同名分支后来指向新提交时，会被识别为新的上游版本。
+
 小娱 C5：
 
 ```text
+upstream_ref: fanchmwrt-25.12.4
 architecture: mipsel
 target:       ramips
 subtarget:    mt7621
@@ -58,6 +56,7 @@ profile:      xiaoyu_xy-c5
 NanoPi R5C：
 
 ```text
+upstream_ref: fanchmwrt-25.12.4
 architecture: arm
 target:       rockchip
 subtarget:    armv8
@@ -67,6 +66,7 @@ profile:      friendlyarm_nanopi-r5c
 x86-64：
 
 ```text
+upstream_ref: fanchmwrt-25.12.4
 architecture: x86
 target:       x86
 subtarget:    64
@@ -74,6 +74,30 @@ profile:      generic
 ```
 
 如果不确定 profile，请先在上游源码的目标配置中确认设备名称。不要根据相似的产品名称猜测，错误的目标固件可能导致设备无法启动。
+
+### 计数规则
+
+自动构建按 UTC 日期限速：每个 GitHub 用户每天最多自动批准 1 次，全仓库每天最多自动批准 3 次；北京时间每天 08:00 进入新的 UTC 日期。
+
+以下情况不计数：
+
+- 模板缺少字段、字段格式错误或架构选项非法。
+- 上游分支、tag 或 commit SHA 不存在。
+- target、subtarget、profile 实际不存在，或者架构与目标不匹配。
+- 过去 30 天内已有相同设备目标和相同上游提交的成功构建，并且原 artifact 仍可下载。Bot 会直接回复原申请和 Actions 链接。
+- 申请已经超过个人或全仓库的当日限额。
+- 仅编辑 Issue 或重复发表评论。
+
+通过全部预检、没有可复用构建且被 Bot 批准的新申请会立即计数。计数后即使依赖安装、feeds、源码下载或后续编译因环境问题失败，也不会退还本次额度；这用于防止反复提交构建任务消耗 Actions。预检本身只读取上游目标元数据，不安装 feeds，也不下载软件包源码。
+
+## 反馈问题和建议
+
+任何 GitHub 用户都可以通过 [New Issue](https://github.com/nd002723/fanchmwrt-builder/issues/new/choose) 页面提交反馈：
+
+- 选择 `Bug 反馈`，报告固件构建、系统升级、外置挂载或内置功能的问题。
+- 选择 `功能建议`，提出设备支持、软件包、升级流程或使用体验方面的建议。
+
+请按模板提供设备型号、固件版本、复现步骤或具体使用场景，并删除日志中的密码、Token 和公网地址。Bug 反馈和功能建议只用于讨论，不会进入自动审核或固件编译任务；需要构建固件时必须选择独立的 `Firmware build` 模板。
 
 ## 在 Fork 中构建
 
