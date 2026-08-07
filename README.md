@@ -1,35 +1,39 @@
 # FanchmWrt Builder
 
-这个仓库从 `fanchmwrt/fanchmwrt` 的指定分支、tag 或提交构建固件。上游仓库只用于读取，不会收到任何提交或推送。
+这是一个面向 FanchmWrt 用户的第三方固件构建项目。它从上游 `fanchmwrt/fanchmwrt` 的指定分支、tag 或提交生成固件，并加入外置 `/overlay` 升级迁移、应用中心和常用管理工具。上游仓库只用于读取，不会收到本项目的提交。
 
-构建参数遵循 OpenWrt 官方命名：
+本项目生成的固件不是上游官方发布。刷写前请备份配置，确认设备型号和目标参数完全匹配，并核对产物中的 SHA256。
 
-- `target`：目标平台，例如 `ramips`、`rockchip`、`x86`
-- `subtarget`：目标子平台，例如 `mt7621`、`armv8`、`64`
-- `profile`：设备 profile，例如 `xiaoyu_xy-c5`、`generic`
-- `architecture`：`mipsel`、`arm` 或 `x86`，用于校验 OpenWrt 解析出的 APK 架构
+## 固件内容
 
-## 固件功能
-
-- 跨 sysupgrade 的外置 `/overlay` 安全迁移
+- 跨 sysupgrade 的外置 `/overlay` 迁移与软件包恢复
 - 应用中心 `luci-app-fwx-app-center`
-- LuCI、中文界面、TTYD 和常用磁盘/终端工具
-- 首次启动刷新 APK 软件源，并把 `https://downloads.openwrt.org` 替换为 `https://mirror.nju.edu.cn/openwrt`
-- 支持 mipsel、32/64 位 ARM 和 x86 架构；软件包使用新固件的依赖解析重新注册
+- LuCI、中文界面和 TTYD
+- `cfdisk`、`e2fsprogs`、`nano-full`、`openssh-sftp-server`
+- 首次启动时把 OpenWrt 官方下载地址替换为南京大学镜像
+- 支持 mipsel、32/64 位 ARM 和 x86
 
 完整内置软件包列表位于 `configs/required-packages.txt`。
 
-## 手动构建
+## 申请构建
 
-1. 打开 GitHub 仓库的 Actions 页面。
-2. 选择 `Build FanchmWrt Firmware`。
-3. 点击 `Run workflow`。
-4. 输入上游提交、架构族、target、subtarget 和 profile。
-5. 构建完成后下载对应 artifact。
+1. 打开仓库的 [New Issue](https://github.com/nd002723/fanchmwrt-builder/issues/new/choose) 页面。
+2. 选择 `Firmware build` 模板。
+3. 填写上游版本、架构、target、subtarget 和 profile，然后提交。
+4. Bot 会校验参数和上游版本。审核通过后，Issue 中会出现 Actions 运行链接。
+5. 构建完成后，从运行页面下载 artifact，并根据设备类型选择对应的 sysupgrade 或安装镜像。
 
-产物包含固件、manifest、SHA256、完整 `.config`、目标信息、上游提交信息以及首次升级辅助脚本。
+自动构建按 UTC 日期限速：每个 GitHub 用户每天最多自动批准 1 次，全仓库每天最多自动批准 3 次。参数错误或超过限额时，Bot 会在 Issue 中说明原因；重复评论不会触发构建。
 
-例如小娱 C5 使用：
+构建参数遵循 OpenWrt 命名：
+
+- `architecture`：选择 `mipsel`、`arm` 或 `x86`
+- `target`：目标平台，例如 `ramips`、`rockchip`、`x86`
+- `subtarget`：目标子平台，例如 `mt7621`、`armv8`、`64`
+- `profile`：设备 profile，例如 `xiaoyu_xy-c5`、`friendlyarm_nanopi-r5c`、`generic`
+- `upstream_ref`：`fanchmwrt/fanchmwrt` 中存在的分支、tag 或完整提交 SHA
+
+小娱 C5：
 
 ```text
 architecture: mipsel
@@ -38,7 +42,7 @@ subtarget:    mt7621
 profile:      xiaoyu_xy-c5
 ```
 
-ARM64 示例：
+NanoPi R5C：
 
 ```text
 architecture: arm
@@ -47,17 +51,7 @@ subtarget:    armv8
 profile:      friendlyarm_nanopi-r5c
 ```
 
-## Issue 触发构建
-
-任何人都可以在 Issues 页面选择 `Firmware build` 模板，填写上游版本、架构、target、subtarget 和 profile。模板会自动添加 `build-firmware` 标签，Bot 随后校验模板结构、参数格式和上游版本是否存在。
-
-校验通过且未超过限额时，Bot 自动添加 `approved-build` 标签并开始构建。默认每个申请者每天自动批准 1 次、全仓库每天自动批准 3 次，按 UTC 日统计；审核任务串行执行，避免并发申请绕过限额。运行链接和最终结果会自动回复到该 Issue。
-
-自动审核拒绝后，仓库所有者仍可检查参数并手动添加 `approved-build` 标签进行例外批准。只有仓库所有者本人添加该标签有效；其他用户的评论、编辑或标签操作不会触发人工批准流程。需要重新构建时，所有者先移除再重新添加该标签。
-
-可以通过仓库 Actions variables 调整自动限额：`AUTO_BUILD_PER_USER_DAILY` 控制每人每日次数，`AUTO_BUILD_GLOBAL_DAILY` 控制全仓库每日次数。只接受 `1` 到 `50` 的整数，非法值会分别回退到 `1` 和 `3`。Actions 用量仍归本仓库，不会转移给申请者。
-
-x86-64 示例：
+x86-64：
 
 ```text
 architecture: x86
@@ -66,25 +60,45 @@ subtarget:    64
 profile:      generic
 ```
 
-## 升级行为
+如果不确定 profile，请先在上游源码的目标配置中确认设备名称。不要根据相似的产品名称猜测，错误的目标固件可能导致设备无法启动。
 
-构建器把标准 `sysupgrade` 的默认值改为保存 overlay 和已安装软件包清单。升级包会在首次启动时重新启用外部 `/overlay`，准备新的 upper/work，等待 extroot 生效后再恢复软件包。
+## 在 Fork 中构建
 
-旧 APK 数据库只作为迁移快照，不会直接合并到新数据库。恢复时优先使用新固件的软件源解析新依赖，其次使用缓存 APK；无法注册的第三方程序保留文件和配置，不覆盖新固件文件。
+需要更多构建次数时，可以 Fork 本仓库并使用自己仓库的 Actions：
 
-第一次从不包含 `extroot-sysupgrade` 的旧固件升级时，应在路由器上运行 artifact 中的：
+1. Fork `nd002723/fanchmwrt-builder`。
+2. 在 Fork 的 Actions 页面启用 workflows。
+3. 选择 `Build FanchmWrt Firmware`，点击 `Run workflow`。
+4. 输入与 Issue 模板相同的五项参数。
+5. 构建完成后在自己的 Actions 运行中下载 artifact。
+
+这种方式的 Actions 用量和产物都归 Fork 所有者，不占用本仓库的自动构建限额。
+
+## 构建产物
+
+Artifact 包含固件、软件包 manifest、SHA256、完整 `.config`、目标信息、上游提交信息以及首次升级辅助脚本。构建成功不代表固件适用于名称相近的其他设备，刷写前仍需核对目标信息。
+
+## 系统升级
+
+使用本项目固件升级时，sysupgrade 会保存外置 `/overlay` 的迁移状态和已安装软件包清单。新系统首次启动后会重新启用外置 `/overlay`，准备新的 upper/work，并在 extroot 生效后恢复软件包。
+
+旧 APK 数据库只作为迁移快照，不会直接合并进新数据库。恢复时优先使用新固件的软件源解析依赖，其次使用缓存 APK；无法重新注册的第三方程序只保留文件和配置，不覆盖新固件文件。
+
+第一次从不包含 `extroot-sysupgrade` 的旧固件升级时，应使用 artifact 中的辅助脚本：
 
 ```sh
 sh first-extroot-sysupgrade.sh <sysupgrade.bin>
 ```
 
-后续使用此构建器生成的固件时，标准 LuCI/sysupgrade 流程会自动保存迁移状态。
+后续在本项目生成的固件之间升级，可以使用标准 LuCI/sysupgrade 流程。没有外置 `/overlay` 时，升级按普通内部 overlay 流程进行，不会尝试恢复不存在的外部挂载。
 
-## 本地检查
+## 本地构建
 
-构建器需要 Linux 构建环境：
+本地构建需要 Linux 环境和足够的磁盘空间：
 
 ```sh
+git clone https://github.com/nd002723/fanchmwrt-builder.git
+cd fanchmwrt-builder
 git clone https://github.com/fanchmwrt/fanchmwrt.git source
 ./scripts/prepare-source.sh source
 cd source
@@ -96,4 +110,4 @@ make -j"$(nproc)"
 ../scripts/verify-build.sh .
 ```
 
-如果上游修改了 `sysupgrade` 或目标配置，补丁校验会直接失败，需要先审查变化再更新本仓库。
+如果上游修改了 sysupgrade 或目标配置，补丁校验会停止构建。这表示本项目需要先适配上游变化，不应跳过校验继续生成固件。
