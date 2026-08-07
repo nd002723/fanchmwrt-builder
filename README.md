@@ -49,9 +49,11 @@ profile:      friendlyarm_nanopi-r5c
 
 ## Issue 触发构建
 
-仓库所有者可以在 Issues 页面选择 `Firmware build` 模板，填写上游版本、架构、target、subtarget 和 profile。带有 `build-firmware` 标签的新 Issue 或重新打开的 Issue 会触发构建，运行链接和最终结果会自动回复到该 Issue。
+任何人都可以在 Issues 页面选择 `Firmware build` 模板，填写上游版本、架构、target、subtarget 和 profile。模板会自动添加 `build-firmware` 标签，但此时只表示构建申请，不会启动 Actions。
 
-为避免公开仓库的 Actions 配额被滥用，只有仓库所有者创建的 Issue 会进入构建；其他用户创建同一模板的 Issue 不会触发编译。
+仓库所有者检查参数后，给仍处于打开状态的申请添加 `approved-build` 标签才会触发编译。只有仓库所有者本人添加该标签有效；其他用户的评论、编辑或标签操作不会触发构建。运行链接和最终结果会自动回复到该 Issue。
+
+需要重新构建时，仓库所有者先移除再重新添加 `approved-build` 标签。每次重新添加都会作为一次新的明确批准。
 
 x86-64 示例：
 

@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Only Issues created by the repository owner trigger a build. Use OpenWrt target, subtarget, and device profile names.
+        Anyone can submit a build request. A build starts only after the repository owner reviews it and adds the `approved-build` label. Use OpenWrt target, subtarget, and device profile names.
 
   - type: input
     id: upstream_ref

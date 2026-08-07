@@ -3,8 +3,7 @@ name: Build Firmware From Issue
 on:
   issues:
     types:
-      - opened
-      - reopened
+      - labeled
 
 permissions:
   contents: read
@@ -12,9 +11,11 @@ permissions:
 
 jobs:
   parse:
-    name: Validate owner build request
+    name: Validate approved build request
     if: >-
-      github.event.issue.user.login == github.repository_owner &&
+      github.event.issue.state == 'open' &&
+      github.event.label.name == 'approved-build' &&
+      github.event.sender.login == github.repository_owner &&
       contains(github.event.issue.labels.*.name, 'build-firmware')
     runs-on: ubuntu-22.04
     outputs:
@@ -46,7 +47,7 @@ jobs:
           script: |
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const body = [
-              '构建请求已通过校验，开始编译。',
+              '仓库所有者已批准此请求，参数校验通过并开始编译。',
               '',
               `- 上游版本：\`${process.env.UPSTREAM_REF}\``,
               `- 架构：\`${process.env.ARCHITECTURE}\``,
@@ -78,7 +79,9 @@ jobs:
       - build
     if: >-
       always() &&
-      github.event.issue.user.login == github.repository_owner &&
+      github.event.issue.state == 'open' &&
+      github.event.label.name == 'approved-build' &&
+      github.event.sender.login == github.repository_owner &&
       contains(github.event.issue.labels.*.name, 'build-firmware')
     runs-on: ubuntu-22.04
     steps:
@@ -92,7 +95,7 @@ jobs:
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             let summary;
             if (process.env.PARSE_RESULT !== 'success') {
-              summary = '构建请求参数校验失败，未触发编译。请按固件构建模板重新创建 Issue。';
+              summary = '构建请求参数校验失败，未触发编译。请修正模板字段；重试时由仓库所有者移除后重新添加 `approved-build` 标签。';
             } else if (process.env.BUILD_RESULT === 'success') {
               summary = '固件构建成功，产物可从本次 Actions 运行中下载。';
             } else if (process.env.BUILD_RESULT === 'cancelled') {
