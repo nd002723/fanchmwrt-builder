@@ -8,6 +8,7 @@ on:
       - reopened
 
 permissions:
+  actions: read
   contents: read
   issues: write
 
@@ -69,6 +70,8 @@ jobs:
         with:
           result-encoding: string
           script: |
+            const crypto = require('crypto');
+
             function positiveLimit(raw, fallback) {
               const parsed = Number.parseInt(raw, 10);
               return Number.isInteger(parsed) && parsed > 0 && parsed <= 50 ? parsed : fallback;
@@ -76,7 +79,36 @@ jobs:
 
             const perUserLimit = positiveLimit(process.env.PER_USER_DAILY_LIMIT, 1);
             const globalLimit = positiveLimit(process.env.GLOBAL_DAILY_LIMIT, 3);
-            const utcDate = new Date().toISOString().slice(0, 10);
+            let upstreamCommit;
+            try {
+              upstreamCommit = await github.rest.repos.getCommit({
+                owner: 'fanchmwrt',
+                repo: 'fanchmwrt',
+                ref: process.env.UPSTREAM_REF
+              });
+            } catch (error) {
+              if (error.status !== 404 && error.status !== 422) throw error;
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `自动审核未通过：上游 \`${process.env.UPSTREAM_REF}\` 不存在或无法解析。`
+              });
+              return 'false';
+            }
+
+            const upstreamSha = upstreamCommit.data.sha;
+            const identity = [
+              upstreamSha,
+              process.env.ARCHITECTURE,
+              process.env.TARGET,
+              process.env.SUBTARGET,
+              process.env.PROFILE
+            ].join('\n');
+            const fingerprint = crypto.createHash('sha256').update(identity).digest('hex');
+            const now = new Date();
+            const utcDate = now.toISOString().slice(0, 10);
+            const reuseCutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
             const approvedIssues = await github.paginate(
               github.rest.issues.listForRepo,
               {
@@ -90,29 +122,124 @@ jobs:
               },
               (response, done) => {
                 const recent = response.data.filter(issue =>
-                  !issue.pull_request && issue.updated_at.slice(0, 10) >= utcDate
+                  !issue.pull_request && issue.updated_at >= reuseCutoff
                 );
-                if (response.data.some(issue => issue.updated_at.slice(0, 10) < utcDate)) done();
+                if (response.data.some(issue => issue.updated_at < reuseCutoff)) done();
                 return recent;
               }
             );
 
-            const commentGroups = await Promise.all(approvedIssues.map(issue =>
-              github.paginate(github.rest.issues.listComments, {
+            const commentGroups = await Promise.all(approvedIssues.map(async issue => ({
+              issue,
+              comments: await github.paginate(github.rest.issues.listComments, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: issue.number,
                 per_page: 100
               })
-            ));
+            })));
+            const botComments = commentGroups.flatMap(group =>
+              group.comments
+                .filter(comment =>
+                  comment.user?.login === 'github-actions[bot]' &&
+                  comment.created_at >= reuseCutoff
+                )
+                .map(comment => ({ ...comment, issue_number: group.issue.number }))
+            );
+
+            const fingerprintPattern = /<!-- fanchmwrt-build fingerprint=([a-f0-9]{64}) -->/;
+            const runPattern = /\/actions\/runs\/(\d+)/;
+            const fingerprintedRuns = new Set();
+            for (const comment of botComments) {
+              const body = comment.body || '';
+              const runMatch = body.match(runPattern);
+              if (runMatch && fingerprintPattern.test(body)) fingerprintedRuns.add(runMatch[1]);
+            }
+
+            const expectedLegacyLines = [
+              `- 上游版本：\`${process.env.UPSTREAM_REF}\``,
+              `- 架构：\`${process.env.ARCHITECTURE}\``,
+              `- 目标：\`${process.env.TARGET}/${process.env.SUBTARGET}/${process.env.PROFILE}\``
+            ];
+            const candidates = [];
+            for (const comment of botComments) {
+              const body = comment.body || '';
+              const runMatch = body.match(runPattern);
+              if (!runMatch) continue;
+              const markerMatch = body.match(fingerprintPattern);
+              const exactMatch = markerMatch?.[1] === fingerprint;
+              const legacyMatch = !markerMatch &&
+                !fingerprintedRuns.has(runMatch[1]) &&
+                expectedLegacyLines.every(line => body.includes(line));
+              if (exactMatch || legacyMatch) {
+                candidates.push({
+                  run_id: Number(runMatch[1]),
+                  issue_number: comment.issue_number,
+                  created_at: comment.created_at
+                });
+              }
+            }
+            candidates.sort((left, right) => right.created_at.localeCompare(left.created_at));
+
+            let duplicate;
+            for (const candidate of candidates) {
+              try {
+                const run = await github.rest.actions.getWorkflowRun({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  run_id: candidate.run_id
+                });
+                if (run.data.conclusion !== 'success') continue;
+                const artifacts = await github.paginate(
+                  github.rest.actions.listWorkflowRunArtifacts,
+                  {
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    run_id: candidate.run_id,
+                    per_page: 100
+                  }
+                );
+                if (!artifacts.some(artifact => !artifact.expired)) continue;
+                duplicate = candidate;
+                break;
+              } catch (error) {
+                if (error.status === 404) continue;
+                throw error;
+              }
+            }
+
+            if (duplicate) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                labels: ['duplicate']
+              });
+              const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${duplicate.run_id}`;
+              const issueUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/issues/${duplicate.issue_number}`;
+              const body = [
+                '检测到过去 30 天内已有相同设备和上游提交的成功构建，本申请不占用自动构建额度，也不会重复编译。',
+                '',
+                `- 上游版本：\`${process.env.UPSTREAM_REF}\``,
+                `- 上游提交：\`${upstreamSha}\``,
+                `- 目标：\`${process.env.TARGET}/${process.env.SUBTARGET}/${process.env.PROFILE}\``,
+                `- [查看原申请 #${duplicate.issue_number}](${issueUrl})`,
+                `- [下载之前的构建产物](${runUrl})`
+              ].join('\n');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body
+              });
+              return 'duplicate';
+            }
+
             const markerPattern = /<!-- fanchmwrt-auto-approved date=(\d{4}-\d{2}-\d{2}) requester=([A-Za-z0-9-]+) -->/g;
             const approvals = [];
-            for (const comments of commentGroups) {
-              for (const comment of comments) {
-                if (comment.user?.login !== 'github-actions[bot]') continue;
-                for (const match of (comment.body || '').matchAll(markerPattern)) {
-                  if (match[1] === utcDate) approvals.push({ requester: match[2] });
-                }
+            for (const comment of botComments) {
+              for (const match of (comment.body || '').matchAll(markerPattern)) {
+                if (match[1] === utcDate) approvals.push({ requester: match[2] });
               }
             }
             const userApprovals = approvals.filter(item => item.requester === process.env.REQUESTER).length;
@@ -130,23 +257,6 @@ jobs:
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
                 body: `自动审核暂未批准：${rejection}\n\n仓库所有者检查后仍可添加 \`approved-build\` 标签进行人工例外批准；也可以在下一个 UTC 日重新打开此 Issue 申请自动审核。`
-              });
-              return 'false';
-            }
-
-            try {
-              await github.rest.repos.getCommit({
-                owner: 'fanchmwrt',
-                repo: 'fanchmwrt',
-                ref: process.env.UPSTREAM_REF
-              });
-            } catch (error) {
-              if (error.status !== 404 && error.status !== 422) throw error;
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: `自动审核未通过：上游 \`${process.env.UPSTREAM_REF}\` 不存在或无法解析。`
               });
               return 'false';
             }
@@ -202,12 +312,28 @@ jobs:
         uses: actions/github-script@v7
         env:
           BUILD_RESULT: ${{ needs.build.result }}
+          UPSTREAM_COMMIT: ${{ needs.build.outputs.upstream_commit }}
+          ARCHITECTURE: ${{ needs.review.outputs.architecture }}
+          TARGET: ${{ needs.review.outputs.target }}
+          SUBTARGET: ${{ needs.review.outputs.subtarget }}
+          PROFILE: ${{ needs.review.outputs.profile }}
         with:
           script: |
+            const crypto = require('crypto');
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             let summary;
+            let marker = '';
             if (process.env.BUILD_RESULT === 'success') {
               summary = '自动批准的固件构建成功，产物可从本次 Actions 运行中下载。';
+              const identity = [
+                process.env.UPSTREAM_COMMIT,
+                process.env.ARCHITECTURE,
+                process.env.TARGET,
+                process.env.SUBTARGET,
+                process.env.PROFILE
+              ].join('\n');
+              const fingerprint = crypto.createHash('sha256').update(identity).digest('hex');
+              marker = `<!-- fanchmwrt-build fingerprint=${fingerprint} -->\n`;
             } else if (process.env.BUILD_RESULT === 'cancelled') {
               summary = '自动批准的固件构建已取消。';
             } else {
@@ -217,5 +343,5 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: `${summary}\n\n[查看 Actions 运行](${runUrl})`
+              body: `${marker}${summary}\n\n[查看 Actions 运行](${runUrl})`
             });

@@ -54,6 +54,10 @@ on:
         description: OpenWrt device profile
         required: true
         type: string
+    outputs:
+      upstream_commit:
+        description: Exact upstream commit used for the build
+        value: ${{ jobs.build.outputs.upstream_commit }}
 
 permissions:
   contents: read
@@ -67,6 +71,8 @@ jobs:
     name: Build ${{ inputs.target }}/${{ inputs.subtarget }}/${{ inputs.profile }}
     runs-on: ubuntu-22.04
     timeout-minutes: 360
+    outputs:
+      upstream_commit: ${{ steps.upstream.outputs.sha }}
 
     steps:
       - name: Checkout builder
@@ -81,7 +87,11 @@ jobs:
           fetch-depth: 1
 
       - name: Record upstream commit
-        run: git -C source rev-parse HEAD
+        id: upstream
+        run: |
+          sha="$(git -C source rev-parse HEAD)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "$sha"
 
       - name: Free runner disk space
         run: |
