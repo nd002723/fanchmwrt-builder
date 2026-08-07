@@ -25,7 +25,7 @@ jobs:
       cancel-in-progress: false
     outputs:
       approved: ${{ steps.review.outputs.result }}
-      upstream_ref: ${{ steps.request.outputs.upstream_ref }}
+      upstream_ref: ${{ steps.upstream.outputs.result }}
       architecture: ${{ steps.request.outputs.architecture }}
       target: ${{ steps.request.outputs.target }}
       subtarget: ${{ steps.request.outputs.subtarget }}
@@ -54,13 +54,83 @@ jobs:
               body: '自动审核未通过：构建参数无效或模板结构已被修改。请使用 `Firmware build` 模板重新提交；仓库所有者也不应批准未经校验的参数。'
             });
 
+      - name: Resolve upstream ref
+        id: upstream
+        if: steps.request.outcome == 'success'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          UPSTREAM_REF: ${{ steps.request.outputs.upstream_ref }}
+        with:
+          result-encoding: string
+          script: |
+            const commit = await github.rest.repos.getCommit({
+              owner: 'fanchmwrt',
+              repo: 'fanchmwrt',
+              ref: process.env.UPSTREAM_REF
+            });
+            return commit.data.sha;
+
+      - name: Report invalid upstream ref
+        if: steps.request.outcome == 'success' && steps.upstream.outcome != 'success'
+        uses: actions/github-script@v7
+        env:
+          UPSTREAM_REF: ${{ steps.request.outputs.upstream_ref }}
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `自动审核未通过：上游 \`${process.env.UPSTREAM_REF}\` 不存在或无法解析。本次申请不进入构建计数。`
+            });
+
+      - name: Checkout upstream target metadata
+        if: steps.upstream.outcome == 'success'
+        uses: actions/checkout@v4
+        with:
+          repository: fanchmwrt/fanchmwrt
+          ref: ${{ steps.upstream.outputs.result }}
+          path: target-source
+          fetch-depth: 1
+
+      - name: Validate OpenWrt target and device profile
+        id: target
+        if: steps.upstream.outcome == 'success'
+        continue-on-error: true
+        env:
+          TARGET: ${{ steps.request.outputs.target }}
+          SUBTARGET: ${{ steps.request.outputs.subtarget }}
+          PROFILE: ${{ steps.request.outputs.profile }}
+          ARCHITECTURE: ${{ steps.request.outputs.architecture }}
+        run: ./scripts/validate-openwrt-target.sh target-source "$TARGET" "$SUBTARGET" "$PROFILE" "$ARCHITECTURE"
+
+      - name: Report invalid OpenWrt target
+        if: steps.target.outcome != 'success' && steps.target.outcome != 'skipped'
+        uses: actions/github-script@v7
+        env:
+          TARGET: ${{ steps.request.outputs.target }}
+          SUBTARGET: ${{ steps.request.outputs.subtarget }}
+          PROFILE: ${{ steps.request.outputs.profile }}
+          ARCHITECTURE: ${{ steps.request.outputs.architecture }}
+        with:
+          script: |
+            const requested = `${process.env.TARGET}/${process.env.SUBTARGET}/${process.env.PROFILE}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `自动审核未通过：上游 OpenWrt 不识别目标 \`${requested}\`，或它与架构 \`${process.env.ARCHITECTURE}\` 不匹配。本次申请不会进入正式编译，也不计入每日额度。`
+            });
+
       - name: Check limits and approve
         id: review
-        if: steps.request.outcome == 'success'
+        if: steps.target.outcome == 'success'
         uses: actions/github-script@v7
         env:
           REQUESTER: ${{ github.event.issue.user.login }}
           UPSTREAM_REF: ${{ steps.request.outputs.upstream_ref }}
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.result }}
           ARCHITECTURE: ${{ steps.request.outputs.architecture }}
           TARGET: ${{ steps.request.outputs.target }}
           SUBTARGET: ${{ steps.request.outputs.subtarget }}
@@ -79,25 +149,7 @@ jobs:
 
             const perUserLimit = positiveLimit(process.env.PER_USER_DAILY_LIMIT, 1);
             const globalLimit = positiveLimit(process.env.GLOBAL_DAILY_LIMIT, 3);
-            let upstreamCommit;
-            try {
-              upstreamCommit = await github.rest.repos.getCommit({
-                owner: 'fanchmwrt',
-                repo: 'fanchmwrt',
-                ref: process.env.UPSTREAM_REF
-              });
-            } catch (error) {
-              if (error.status !== 404 && error.status !== 422) throw error;
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: `自动审核未通过：上游 \`${process.env.UPSTREAM_REF}\` 不存在或无法解析。`
-              });
-              return 'false';
-            }
-
-            const upstreamSha = upstreamCommit.data.sha;
+            const upstreamSha = process.env.UPSTREAM_SHA;
             const identity = [
               upstreamSha,
               process.env.ARCHITECTURE,
@@ -275,6 +327,7 @@ jobs:
               '',
               `- 申请者：@${process.env.REQUESTER}`,
               `- 上游版本：\`${process.env.UPSTREAM_REF}\``,
+              `- 上游提交：\`${upstreamSha}\``,
               `- 架构：\`${process.env.ARCHITECTURE}\``,
               `- 目标：\`${process.env.TARGET}/${process.env.SUBTARGET}/${process.env.PROFILE}\``,
               `- 自动限额：每人 ${perUserLimit} 次/UTC 日，全仓库 ${globalLimit} 次/UTC 日`,

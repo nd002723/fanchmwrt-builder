@@ -19,7 +19,7 @@ jobs:
       contains(github.event.issue.labels.*.name, 'build-firmware')
     runs-on: ubuntu-22.04
     outputs:
-      upstream_ref: ${{ steps.request.outputs.upstream_ref }}
+      upstream_ref: ${{ steps.upstream.outputs.result }}
       architecture: ${{ steps.request.outputs.architecture }}
       target: ${{ steps.request.outputs.target }}
       subtarget: ${{ steps.request.outputs.subtarget }}
@@ -35,10 +35,42 @@ jobs:
           ISSUE_BODY: ${{ github.event.issue.body }}
         run: python3 scripts/parse-build-issue.py
 
+      - name: Resolve upstream ref
+        id: upstream
+        uses: actions/github-script@v7
+        env:
+          UPSTREAM_REF: ${{ steps.request.outputs.upstream_ref }}
+        with:
+          result-encoding: string
+          script: |
+            const commit = await github.rest.repos.getCommit({
+              owner: 'fanchmwrt',
+              repo: 'fanchmwrt',
+              ref: process.env.UPSTREAM_REF
+            });
+            return commit.data.sha;
+
+      - name: Checkout upstream target metadata
+        uses: actions/checkout@v4
+        with:
+          repository: fanchmwrt/fanchmwrt
+          ref: ${{ steps.upstream.outputs.result }}
+          path: target-source
+          fetch-depth: 1
+
+      - name: Validate OpenWrt target and device profile
+        env:
+          TARGET: ${{ steps.request.outputs.target }}
+          SUBTARGET: ${{ steps.request.outputs.subtarget }}
+          PROFILE: ${{ steps.request.outputs.profile }}
+          ARCHITECTURE: ${{ steps.request.outputs.architecture }}
+        run: ./scripts/validate-openwrt-target.sh target-source "$TARGET" "$SUBTARGET" "$PROFILE" "$ARCHITECTURE"
+
       - name: Report accepted request
         uses: actions/github-script@v7
         env:
           UPSTREAM_REF: ${{ steps.request.outputs.upstream_ref }}
+          UPSTREAM_COMMIT: ${{ steps.upstream.outputs.result }}
           ARCHITECTURE: ${{ steps.request.outputs.architecture }}
           TARGET: ${{ steps.request.outputs.target }}
           SUBTARGET: ${{ steps.request.outputs.subtarget }}
@@ -50,6 +82,7 @@ jobs:
               '仓库所有者已批准此请求，参数校验通过并开始编译。',
               '',
               `- 上游版本：\`${process.env.UPSTREAM_REF}\``,
+              `- 上游提交：\`${process.env.UPSTREAM_COMMIT}\``,
               `- 架构：\`${process.env.ARCHITECTURE}\``,
               `- 目标：\`${process.env.TARGET}/${process.env.SUBTARGET}/${process.env.PROFILE}\``,
               `- [查看 Actions 运行](${runUrl})`

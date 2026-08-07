@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Anyone can submit a build request. If the same device and upstream commit were built successfully in the past 30 days and its artifact is still available, the bot returns that Actions run without consuming the daily limit. Otherwise, the bot validates the request and applies daily rate limits before starting a build. Use OpenWrt target, subtarget, and device profile names.
+        Anyone can submit a build request. Before counting or compiling, the bot uses OpenWrt's target metadata to reject nonexistent target, subtarget, profile, and architecture combinations. If the same valid device and upstream commit were built successfully in the past 30 days and its artifact is still available, the bot returns that Actions run without consuming the daily limit. Use OpenWrt target, subtarget, and device profile names.
 
   - type: input
     id: upstream_ref

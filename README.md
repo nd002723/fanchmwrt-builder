@@ -20,10 +20,12 @@
 1. 打开仓库的 [New Issue](https://github.com/nd002723/fanchmwrt-builder/issues/new/choose) 页面。
 2. 选择 `Firmware build` 模板。
 3. 填写上游版本、架构、target、subtarget 和 profile，然后提交。
-4. Bot 会校验参数和上游版本。审核通过后，Issue 中会出现 Actions 运行链接。
+4. Bot 会先使用上游 OpenWrt 的目标元数据校验 target、subtarget、profile、架构和上游版本。审核通过后，Issue 中会出现 Actions 运行链接。
 5. 构建完成后，从运行页面下载 artifact，并根据设备类型选择对应的 sysupgrade 或安装镜像。
 
 自动构建按 UTC 日期限速：每个 GitHub 用户每天最多自动批准 1 次，全仓库每天最多自动批准 3 次。参数错误或超过限额时，Bot 会在 Issue 中说明原因；重复评论不会触发构建。
+
+格式合法但实际不存在的 target、subtarget、profile 或错误的架构组合会在预检阶段被拒绝，不进入正式编译，也不计入每日额度。预检只读取上游目标元数据，不安装 feeds、不下载软件包源码。
 
 如果过去 30 天内已经成功构建过相同设备目标和相同上游提交，并且原 artifact 仍未过期，Bot 会在新 Issue 中直接返回之前的申请和 Actions 下载链接，不重复编译，也不占用个人或全仓库的每日额度。上游分支名称相同但已经指向新提交时会视为新版本，正常进入限额检查和构建流程。
 
