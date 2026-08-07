@@ -36,7 +36,9 @@ EOF
 
 cat > "$artifact_dir/UPGRADE-NOTES.txt" <<'EOF'
 Upgrade policy:
-- sysupgrade saves changed overlay files and the installed package manifest.
+- sysupgrade saves /etc configuration and the installed package manifest.
+- external-overlay package files are migrated directly from the old disk upper,
+  so they are not duplicated in the memory-backed sysupgrade archive.
 - firmware-owned APK repository files are refreshed from /rom on first boot.
 - downloads.openwrt.org is replaced with mirror.nju.edu.cn/openwrt.
 - the external /overlay mount is re-enabled before the activation reboot.
@@ -46,4 +48,3 @@ Upgrade policy:
 - failed migrations retain backups for rollback; successful migrations remove them.
 - use first-extroot-sysupgrade.sh for the first upgrade from firmware without this package.
 EOF
-

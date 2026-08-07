@@ -17,7 +17,7 @@ section="$(uci -q show fstab | sed -n \
 	"s/^fstab\.\([^.=]*\)\.target='\/overlay'$/\1/p" | head -n 1)"
 
 if [ -z "$section" ]; then
-	exec sysupgrade -o -k "$image"
+	exec sysupgrade -c -k "$image"
 fi
 
 old_enabled="$(uci -q get "fstab.$section.enabled")"
@@ -48,7 +48,7 @@ uci -q set "fstab.$section.enabled=0" && uci -q commit fstab || {
 
 trap restore_live_state EXIT INT TERM
 echo "Extroot is disabled in the upgrade backup; starting bootstrap sysupgrade."
-sysupgrade -o -k "$image"
+sysupgrade -c -k "$image"
 ret=$?
 restore_live_state
 trap - EXIT INT TERM

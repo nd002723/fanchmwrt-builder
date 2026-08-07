@@ -1,0 +1,153 @@
+#!/bin/sh
+
+. /usr/share/libubox/jshn.sh
+
+action=$1
+shift
+
+if [ -f /usr/bin/apk ]; then
+	ipkg_bin=apk
+else
+	ipkg_bin=opkg
+fi
+
+retained_package_unregistered() {
+	local package="$1"
+
+	[ -r /etc/extroot-sysupgrade/retained_packages ] || return 1
+	grep -Fxq "$package" /etc/extroot-sysupgrade/retained_packages || return 1
+	apk info -e "$package" >/dev/null 2>&1 && return 1
+	return 0
+}
+
+retained_package_json() {
+	local package="$1"
+
+	awk -F: -v wanted="$package" '
+		function flush() {
+			if (!active)
+				return
+			if (version == "")
+				version = "retained"
+			if (size == "")
+				size = 0
+			if (installsize == "")
+				installsize = 0
+			printf "{\"package\":\"%s-%s\",\"name\":\"%s\",\"version\":\"%s\",\"size\":%d,\"installed-size\":%d,\"status\":[\"installed\"],\"retained\":true}", wanted, version, wanted, version, size + 0, installsize + 0
+		}
+		/^C:/ {
+			flush()
+			active = 0
+			version = size = installsize = ""
+			next
+		}
+		$1 == "P" { active = ($2 == wanted); next }
+		!active { next }
+		$1 == "V" { version = $2; next }
+		$1 == "S" { size = $2; next }
+		$1 == "I" { installsize = $2; next }
+		END { flush() }
+	' /etc/extroot-sysupgrade/apk-db/installed
+}
+
+append_retained_installed() {
+	local base block package retained
+
+	base="$1"
+	retained=/etc/extroot-sysupgrade/retained_packages
+	[ -r "$retained" ] || {
+		printf '%s\n' "$base"
+		return
+	}
+	case "$base" in
+		*']') base="${base%]}";;
+		*) printf '%s\n' "$base"; return;;
+	esac
+
+	printf '%s' "$base"
+	while IFS= read -r package; do
+		[ -n "$package" ] || continue
+		retained_package_unregistered "$package" || continue
+		block="$(retained_package_json "$package")"
+		[ -n "$block" ] || continue
+		printf ',%s' "$block"
+	done < "$retained"
+	printf ']\n'
+}
+
+case "$action" in
+	list-installed)
+		if [ "$ipkg_bin" = apk ]; then
+			append_retained_installed "$(apk query --fields all --format json --installed --from system '*' 2>/dev/null)"
+		else
+			cat /usr/lib/opkg/status
+		fi
+	;;
+	list-available)
+		if [ "$ipkg_bin" = apk ]; then
+			apk list --full --allow-untrusted 2>/dev/null
+		else
+			lists_dir=$(sed -rne 's#^lists_dir \S+ (\S+)#\1#p' /etc/opkg.conf /etc/opkg/*.conf 2>/dev/null | tail -n 1)
+			find "${lists_dir:-/usr/lib/opkg/lists}" -type f '!' -name '*.sig' | xargs -r gzip -cd
+		fi
+	;;
+	install|update|upgrade|remove)
+		if [ "$action" = remove ] && [ "$#" -eq 1 ] && retained_package_unregistered "$1"; then
+			json_init
+			json_add_int code 1
+			json_add_string stderr "Package $1 is retained from the previous firmware and is not registered in APK; reinstall it from a trusted APK archive before removing it."
+			json_dump
+			exit 0
+		fi
+		(
+			cmd="$ipkg_bin"
+			if [ "$ipkg_bin" = apk ]; then
+				case "$action" in
+					install) action="add --allow-untrusted";;
+					update) action="update --allow-untrusted";;
+					upgrade) action=upgrade;;
+					remove) action=del;;
+				 esac
+				while [ -n "$1" ]; do
+					case "$1" in
+						--autoremove) shift;;
+						--force-removal-of-dependent-packages) cmd="$cmd -r"; shift;;
+						--force-overwrite) cmd="$cmd $1"; shift;;
+						-*) shift;;
+						*) break;;
+					esac
+				done
+			else
+				while [ -n "$1" ]; do
+					case "$1" in
+						--autoremove|--force-overwrite|--force-removal-of-dependent-packages) cmd="$cmd $1"; shift;;
+						-*) shift;;
+						*) break;;
+					esac
+				done
+			fi
+			if flock -x 200; then
+				pkmcmd="$cmd $action $@"
+				$cmd $action "$@" </dev/null >/tmp/ipkg.out 2>/tmp/ipkg.err
+				code=$?
+				stdout=$(cat /tmp/ipkg.out)
+				stderr=$(cat /tmp/ipkg.err)
+			else
+				code=255
+				stderr="Failed to acquire lock"
+			fi
+			json_init
+			json_add_int code $code
+			[ -n "$pkmcmd" ] && json_add_string pkmcmd "$pkmcmd"
+			[ -n "$stdout" ] && json_add_string stdout "$stdout"
+			[ -n "$stderr" ] && json_add_string stderr "$stderr"
+			json_dump
+		) 200>/tmp/ipkg.lock
+		rm -f /tmp/ipkg.lock /tmp/ipkg.err /tmp/ipkg.out
+	;;
+	*)
+		echo "Usage: $0 {list-installed|list-available|update}" >&2
+		echo "       $0 {install|upgrade|remove} pkg[ pkg... ]" >&2
+		exit 1
+	;;
+esac
