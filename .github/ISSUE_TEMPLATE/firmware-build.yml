@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Anyone can submit a build request. A build starts only after the repository owner reviews it and adds the `approved-build` label. Use OpenWrt target, subtarget, and device profile names.
+        Anyone can submit a build request. The bot validates the request and applies daily rate limits before starting a build. If automatic approval is denied, the repository owner can still review it and add the `approved-build` label. Use OpenWrt target, subtarget, and device profile names.
 
   - type: input
     id: upstream_ref

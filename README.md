@@ -49,11 +49,13 @@ profile:      friendlyarm_nanopi-r5c
 
 ## Issue 触发构建
 
-任何人都可以在 Issues 页面选择 `Firmware build` 模板，填写上游版本、架构、target、subtarget 和 profile。模板会自动添加 `build-firmware` 标签，但此时只表示构建申请，不会启动 Actions。
+任何人都可以在 Issues 页面选择 `Firmware build` 模板，填写上游版本、架构、target、subtarget 和 profile。模板会自动添加 `build-firmware` 标签，Bot 随后校验模板结构、参数格式和上游版本是否存在。
 
-仓库所有者检查参数后，给仍处于打开状态的申请添加 `approved-build` 标签才会触发编译。只有仓库所有者本人添加该标签有效；其他用户的评论、编辑或标签操作不会触发构建。运行链接和最终结果会自动回复到该 Issue。
+校验通过且未超过限额时，Bot 自动添加 `approved-build` 标签并开始构建。默认每个申请者每天自动批准 1 次、全仓库每天自动批准 3 次，按 UTC 日统计；审核任务串行执行，避免并发申请绕过限额。运行链接和最终结果会自动回复到该 Issue。
 
-需要重新构建时，仓库所有者先移除再重新添加 `approved-build` 标签。每次重新添加都会作为一次新的明确批准。
+自动审核拒绝后，仓库所有者仍可检查参数并手动添加 `approved-build` 标签进行例外批准。只有仓库所有者本人添加该标签有效；其他用户的评论、编辑或标签操作不会触发人工批准流程。需要重新构建时，所有者先移除再重新添加该标签。
+
+可以通过仓库 Actions variables 调整自动限额：`AUTO_BUILD_PER_USER_DAILY` 控制每人每日次数，`AUTO_BUILD_GLOBAL_DAILY` 控制全仓库每日次数。只接受 `1` 到 `50` 的整数，非法值会分别回退到 `1` 和 `3`。Actions 用量仍归本仓库，不会转移给申请者。
 
 x86-64 示例：
 
