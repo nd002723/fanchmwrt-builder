@@ -93,6 +93,14 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "$sha"
 
+      - name: Validate OpenWrt target and device profile
+        env:
+          TARGET: ${{ inputs.target }}
+          SUBTARGET: ${{ inputs.subtarget }}
+          PROFILE: ${{ inputs.profile }}
+          ARCHITECTURE: ${{ inputs.architecture }}
+        run: ./scripts/validate-openwrt-target.sh source "$TARGET" "$SUBTARGET" "$PROFILE" "$ARCHITECTURE"
+
       - name: Free runner disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
