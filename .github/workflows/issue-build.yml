@@ -1,0 +1,108 @@
+name: Build Firmware From Issue
+
+on:
+  issues:
+    types:
+      - opened
+      - reopened
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  parse:
+    name: Validate owner build request
+    if: >-
+      github.event.issue.user.login == github.repository_owner &&
+      contains(github.event.issue.labels.*.name, 'build-firmware')
+    runs-on: ubuntu-22.04
+    outputs:
+      upstream_ref: ${{ steps.request.outputs.upstream_ref }}
+      architecture: ${{ steps.request.outputs.architecture }}
+      target: ${{ steps.request.outputs.target }}
+      subtarget: ${{ steps.request.outputs.subtarget }}
+      profile: ${{ steps.request.outputs.profile }}
+    steps:
+      - name: Checkout builder
+        uses: actions/checkout@v4
+
+      - name: Parse and validate issue form
+        id: request
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: python3 scripts/parse-build-issue.py
+
+      - name: Report accepted request
+        uses: actions/github-script@v7
+        env:
+          UPSTREAM_REF: ${{ steps.request.outputs.upstream_ref }}
+          ARCHITECTURE: ${{ steps.request.outputs.architecture }}
+          TARGET: ${{ steps.request.outputs.target }}
+          SUBTARGET: ${{ steps.request.outputs.subtarget }}
+          PROFILE: ${{ steps.request.outputs.profile }}
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              '构建请求已通过校验，开始编译。',
+              '',
+              `- 上游版本：\`${process.env.UPSTREAM_REF}\``,
+              `- 架构：\`${process.env.ARCHITECTURE}\``,
+              `- 目标：\`${process.env.TARGET}/${process.env.SUBTARGET}/${process.env.PROFILE}\``,
+              `- [查看 Actions 运行](${runUrl})`
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
+
+  build:
+    name: Build requested firmware
+    needs: parse
+    uses: ./.github/workflows/build.yml
+    with:
+      upstream_ref: ${{ needs.parse.outputs.upstream_ref }}
+      architecture: ${{ needs.parse.outputs.architecture }}
+      target: ${{ needs.parse.outputs.target }}
+      subtarget: ${{ needs.parse.outputs.subtarget }}
+      profile: ${{ needs.parse.outputs.profile }}
+
+  report:
+    name: Report final status
+    needs:
+      - parse
+      - build
+    if: >-
+      always() &&
+      github.event.issue.user.login == github.repository_owner &&
+      contains(github.event.issue.labels.*.name, 'build-firmware')
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Comment on issue
+        uses: actions/github-script@v7
+        env:
+          PARSE_RESULT: ${{ needs.parse.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            let summary;
+            if (process.env.PARSE_RESULT !== 'success') {
+              summary = '构建请求参数校验失败，未触发编译。请按固件构建模板重新创建 Issue。';
+            } else if (process.env.BUILD_RESULT === 'success') {
+              summary = '固件构建成功，产物可从本次 Actions 运行中下载。';
+            } else if (process.env.BUILD_RESULT === 'cancelled') {
+              summary = '固件构建已取消。';
+            } else {
+              summary = '固件构建失败，请查看 Actions 日志。';
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `${summary}\n\n[查看 Actions 运行](${runUrl})`
+            });

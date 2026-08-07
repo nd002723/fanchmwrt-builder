@@ -32,6 +32,28 @@ on:
         required: true
         default: xiaoyu_xy-c5
         type: string
+  workflow_call:
+    inputs:
+      upstream_ref:
+        description: Upstream branch, tag, or full commit SHA
+        required: true
+        type: string
+      architecture:
+        description: Package architecture family
+        required: true
+        type: string
+      target:
+        description: OpenWrt target
+        required: true
+        type: string
+      subtarget:
+        description: OpenWrt subtarget
+        required: true
+        type: string
+      profile:
+        description: OpenWrt device profile
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -127,4 +149,3 @@ jobs:
           name: fanchmwrt-build-logs
           path: source/logs/
           if-no-files-found: ignore
-

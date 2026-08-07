@@ -35,7 +35,7 @@
 architecture: mipsel
 target:       ramips
 subtarget:    mt7621
- profile:      xiaoyu_xy-c5
+profile:      xiaoyu_xy-c5
 ```
 
 ARM64 示例：
@@ -46,6 +46,12 @@ target:       rockchip
 subtarget:    armv8
 profile:      friendlyarm_nanopi-r5c
 ```
+
+## Issue 触发构建
+
+仓库所有者可以在 Issues 页面选择 `Firmware build` 模板，填写上游版本、架构、target、subtarget 和 profile。带有 `build-firmware` 标签的新 Issue 或重新打开的 Issue 会触发构建，运行链接和最终结果会自动回复到该 Issue。
+
+为避免公开仓库的 Actions 配额被滥用，只有仓库所有者创建的 Issue 会进入构建；其他用户创建同一模板的 Issue 不会触发编译。
 
 x86-64 示例：
 
