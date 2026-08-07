@@ -1,0 +1,62 @@
+name: 功能建议
+description: 建议新的固件功能、设备支持或构建体验改进
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请说明实际使用场景和预期收益。此模板只用于功能讨论，不会触发固件构建。
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 建议范围
+      options:
+        - 新设备或新架构支持
+        - 固件内置软件
+        - 系统升级与配置迁移
+        - 外置 /overlay 或 extroot
+        - GitHub Actions 构建流程
+        - Issue 申请体验
+        - 文档
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: 使用场景
+      description: 当前遇到了什么限制，哪些用户会从中受益
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 描述希望增加或改变的行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 可选方案
+      description: 如果已经尝试过其他做法，请说明结果
+
+  - type: textarea
+    id: references
+    attributes:
+      label: 参考资料
+      description: 可以提供 OpenWrt 文档、相关仓库或软件包链接
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: 提交确认
+      options:
+        - label: 我确认此 Issue 是功能建议，不是固件构建申请
+          required: true

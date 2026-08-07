@@ -1,0 +1,80 @@
+name: Bug 反馈
+description: 报告固件构建、系统升级、外置挂载或内置功能的问题
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请提供可复现的信息，但不要公开密码、密钥、Token、DDNS 地址或其他敏感数据。此模板只用于反馈问题，不会触发固件构建。
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: 问题模块
+      options:
+        - 固件构建
+        - 系统升级
+        - 外置 /overlay 或 extroot
+        - APK 软件包恢复
+        - 应用中心
+        - LuCI 或网络管理
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: 设备型号
+      description: 请填写准确型号，不要只填写芯片名称
+      placeholder: NanoPi R5C
+    validations:
+      required: true
+
+  - type: input
+    id: firmware
+    attributes:
+      label: 固件版本或 Actions 运行链接
+      description: 建议填写下载固件时对应的 Actions URL 或上游版本
+      placeholder: https://github.com/nd002723/fanchmwrt-builder/actions/runs/...
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题描述
+      description: 说明实际结果以及原本预期的结果
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 按顺序列出能稳定复现问题的操作
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: 请先删除密码、Token、公网地址和其他敏感信息
+      render: shell
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: 提交确认
+      options:
+        - label: 我已检查并删除上述内容中的敏感信息
+          required: true
+        - label: 我确认此 Issue 是问题反馈，不是固件构建申请
+          required: true
