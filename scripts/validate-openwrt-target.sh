@@ -35,6 +35,7 @@ dump_script="$source_dir/scripts/dump-target-info.pl"
 
 if ! target_info="$(
 	make -C "$target_dir" --no-print-directory \
+		TOPDIR="$source_dir" \
 		DUMP=1 TARGET_BUILD=1 SUBTARGET="$subtarget" 2>/dev/null
 )"; then
 	echo "OpenWrt could not load target: $target/$subtarget" >&2
