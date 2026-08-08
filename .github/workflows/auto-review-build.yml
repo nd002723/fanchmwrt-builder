@@ -398,3 +398,12 @@ jobs:
               issue_number: context.issue.number,
               body: `${marker}${summary}\n\n[查看 Actions 运行](${runUrl})`
             });
+            if (process.env.BUILD_RESULT === 'success') {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                state: 'closed',
+                state_reason: 'completed'
+              });
+            }

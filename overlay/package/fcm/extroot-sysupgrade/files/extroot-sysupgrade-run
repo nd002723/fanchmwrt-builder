@@ -286,6 +286,94 @@ retain_unmanifested_packages() {
 	log "retained package files that are absent from the new firmware"
 }
 
+world_package_names() {
+	awk '
+		match($0, /^[A-Za-z0-9][A-Za-z0-9+_.-]*/) {
+			print substr($0, RSTART, RLENGTH)
+		}' "$1" | sort -u
+}
+
+collect_old_world_candidates() {
+	local candidates new_names old_names old_upper package
+
+	old_upper="$1"
+	candidates="$STATE_DIR/world_candidates"
+	new_names="$STATE_DIR/new_world_packages"
+	old_names="$STATE_DIR/old_world_packages"
+	: > "$candidates" || return 1
+
+	[ -r "$old_upper/etc/apk/world" ] || {
+		log "old APK world is unavailable; package manifests remain authoritative"
+		return 0
+	}
+	[ -r /etc/apk/world ] || {
+		log "new firmware APK world is unavailable"
+		return 1
+	}
+
+	world_package_names /etc/apk/world > "$new_names" || return 1
+	world_package_names "$old_upper/etc/apk/world" > "$old_names" || return 1
+	while IFS= read -r package; do
+		[ -n "$package" ] || continue
+		grep -Fxq "$package" "$new_names" && continue
+		printf '%s\n' "$package" >> "$candidates" || return 1
+	done < "$old_names"
+
+	sort -u "$candidates" > "$candidates.new" && mv "$candidates.new" "$candidates" || return 1
+	rm -f "$new_names" "$old_names"
+	log "collected $(wc -l < "$candidates") package names missing from the new firmware world"
+}
+
+restore_unowned_files() {
+	local candidates copied dest old_upper path src
+
+	old_upper="$1"
+	[ -d "$old_upper" ] || {
+		log "old external upper is unavailable for unowned file recovery"
+		return 1
+	}
+
+	candidates="$STATE_DIR/unowned_candidates"
+	copied="$STATE_DIR/restored_unowned_files"
+	: > "$copied" || return 1
+	find "$old_upper" -xdev \( -type f -o -type l \) -print > "$candidates" || return 1
+
+	while IFS= read -r src; do
+		path="${src#"$old_upper"}"
+		[ "$path" != "$src" ] || continue
+		case "$path" in
+			/*) ;;
+			*) continue;;
+		esac
+		case "$path" in
+			/etc/apk/*|/lib/apk/*|/etc/extroot-sysupgrade/*|/etc/uci-defaults/*|\
+			/overlay/*|/tmp/*|/var/lock/*|/var/log/*|/var/run/*|*/../*|*/..)
+				continue
+			;;
+		esac
+
+		# The merged root includes both the new firmware and packages restored
+		# above. Never replace either a file or a dangling symlink from them.
+		[ ! -e "$path" ] && [ ! -L "$path" ] || continue
+		dest="$path"
+		mkdir -p "${dest%/*}" || {
+			rm -f "$candidates"
+			return 1
+		}
+		cp -a "$src" "$dest" || {
+			rm -f "$candidates"
+			return 1
+		}
+		printf '%s\n' "$path" >> "$copied" || {
+			rm -f "$candidates"
+			return 1
+		}
+	done < "$candidates"
+
+	rm -f "$candidates"
+	log "restored $(wc -l < "$copied") unowned files without replacing new firmware files"
+}
+
 prepare_external_overlay() {
 	local backup_dir backup_id device section
 
@@ -390,7 +478,7 @@ retry_extroot_enable() {
 }
 
 restore_packages() {
-	local archive failed need_repositories package packages repositories_available retained
+	local archive backup_dir backup_ref failed need_repositories package packages repositories_available retained world_candidates
 
 	extroot_is_active || fail "fresh extroot is not active; package restore was not started"
 	[ -r "$MANIFEST" ] || fail "installed package manifest is missing"
@@ -399,9 +487,24 @@ restore_packages() {
 	packages="$STATE_DIR/packages"
 	failed="$STATE_DIR/failed_packages"
 	retained="$STATE_DIR/retained_packages"
+	world_candidates="$STATE_DIR/world_candidates"
+	backup_ref="$(read_state backup)"
+	case "$backup_ref" in
+		"$BACKUP_ROOT"/*) ;;
+		*)
+			log "saved external overlay backup path is invalid"
+			return 1
+		;;
+	esac
+	backup_dir="/overlay/$backup_ref"
+	collect_old_world_candidates "$backup_dir/upper" || {
+		log "cannot collect package candidates from the old APK world"
+		return 1
+	}
 	{
 		awk '$2 == "overlay" { print $1 }' "$MANIFEST"
 		[ -r "$retained" ] && cat "$retained"
+		[ -r "$world_candidates" ] && cat "$world_candidates"
 		printf '%s\n' luci-app-fwx-app-center
 	} | sort -u > "$packages"
 	: > "$failed"
@@ -446,16 +549,35 @@ restore_packages() {
 					break
 				fi
 			done
-		log "keeping retained package files without APK registration: $package"
+			if apk info -e "$package" >/dev/null 2>&1; then
+				continue
+			fi
+			log "keeping retained package files without APK registration: $package"
 			continue
 		fi
 		[ "$repositories_available" -eq 1 ] || {
+			if grep -Fxq "$package" "$world_candidates" 2>/dev/null; then
+				log "keeping unavailable old-world candidate outside the active APK world: $package"
+				continue
+			fi
 			echo "$package" >> "$failed"
 			continue
 		}
 		log "restoring package $package"
-		apk add "$package" >> "$STATE_DIR/restore.log" 2>&1 || echo "$package" >> "$failed"
+		if apk add "$package" >> "$STATE_DIR/restore.log" 2>&1; then
+			continue
+		fi
+		if grep -Fxq "$package" "$world_candidates" 2>/dev/null; then
+			log "old-world candidate is not installable from the new repositories: $package"
+		else
+			echo "$package" >> "$failed"
+		fi
 	done < "$packages"
+
+	restore_unowned_files "$backup_dir/upper" || {
+		log "unowned file recovery failed; keeping the old external upper"
+		return 1
+	}
 
 	if [ -s "$failed" ]; then
 		log "some packages could not be restored; see $failed"

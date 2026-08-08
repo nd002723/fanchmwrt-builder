@@ -39,12 +39,14 @@ Upgrade policy:
 - sysupgrade saves /etc configuration and the installed package manifest.
 - external-overlay package files are migrated directly from the old disk upper,
   so they are not duplicated in the memory-backed sysupgrade archive.
-- firmware-owned APK repository files are refreshed from /rom on first boot.
+- firmware-owned APK world and repository files are refreshed from /rom on first boot.
 - downloads.openwrt.org is replaced with mirror.nju.edu.cn/openwrt.
 - the external /overlay mount is re-enabled before the activation reboot.
 - old external upper/work directories are kept until package restoration succeeds.
 - packages absent from the new firmware are retained without importing the old APK database.
 - the new APK resolver re-registers packages from the new repositories or cached APK files.
+- old world entries are reduced to package-name candidates; raw version/checksum constraints are never merged.
+- unowned regular files and symlinks are restored only when the new root has no matching path.
 - failed migrations retain backups for rollback; successful migrations remove them.
 - use first-extroot-sysupgrade.sh for the first upgrade from firmware without this package.
 EOF

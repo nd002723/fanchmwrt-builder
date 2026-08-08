@@ -21,7 +21,7 @@
 2. 选择 `Firmware build` 模板。
 3. 填写上游版本、架构、target、subtarget 和 profile，然后提交。
 4. Bot 会先使用上游 OpenWrt 的目标元数据校验 target、subtarget、profile、架构和上游版本。审核通过后，Issue 中会出现 Actions 运行链接。
-5. 构建完成后，从运行页面下载 artifact，并根据设备类型选择对应的 sysupgrade 或安装镜像。
+5. 构建完成后，从运行页面下载 artifact，并根据设备类型选择对应的 sysupgrade 或安装镜像；构建成功后 Bot 会把申请 Issue 标记为已完成并自动关闭，失败的申请保持打开。
 
 ### 参数命名
 
@@ -117,9 +117,9 @@ Artifact 包含固件、软件包 manifest、SHA256、完整 `.config`、目标�
 
 ## 系统升级
 
-使用本项目固件升级时，sysupgrade 只把 `/etc` 配置、外置 `/overlay` 的迁移状态和已安装软件包清单写入内存备份，不会把整个外置 upper 重复压缩进 `/tmp`。新系统首次启动后会重新启用外置 `/overlay`，直接从旧磁盘 upper 迁移用户安装包的文件和配置，准备新的 upper/work，并在 extroot 生效后恢复软件包。
+使用本项目固件升级时，sysupgrade 只把 `/etc` 配置、外置 `/overlay` 的迁移状态和已安装软件包清单写入内存备份，不会把整个外置 upper 重复压缩进 `/tmp`。APK world 和软件源由新固件从 `/rom` 刷新，避免旧内核或旧基础包约束阻塞后续安装。新系统首次启动后会重新启用外置 `/overlay`，直接从旧磁盘 upper 迁移用户安装包的文件和配置，准备新的 upper/work，并在 extroot 生效后恢复软件包。
 
-旧 APK 数据库只作为迁移快照，不会直接合并进新数据库。恢复时优先使用新固件的软件源解析依赖，其次使用缓存 APK；无法重新注册的用户程序仍保留文件和配置，不覆盖新固件文件。Package Manager 会把这类 retained 程序列出，并拒绝对未注册包执行普通 APK 删除操作，避免它们从页面消失或被误处理。
+旧 APK 数据库只作为迁移快照，不会直接合并进新数据库。旧 world 也只用于提取包名候选：新 world 已有的同名包会跳过，只有通过新软件源或缓存 APK 成功注册的包才会由 APK 写回 world，无法满足的旧约束不会进入 active world。恢复时优先使用新固件的软件源解析依赖，其次使用缓存 APK；无法重新注册的用户程序仍保留文件和配置，不覆盖新固件文件。完成软件包恢复后，迁移程序还会从旧 upper 补回新系统中不存在的普通文件和符号链接，例如应用运行时下载的核心程序；同名文件、APK 状态、软件源和运行时目录不会被覆盖。Package Manager 会把 retained 程序列出，并拒绝对未注册包执行普通 APK 删除操作，避免它们从页面消失或被误处理。
 
 第一次从不包含 `extroot-sysupgrade` 的旧固件升级时，应使用 artifact 中的辅助脚本：
 

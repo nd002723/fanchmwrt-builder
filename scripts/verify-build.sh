@@ -39,12 +39,20 @@ test -x "$rootfs/etc/uci-defaults/99-fanchmwrt-repositories"
 grep -Fxq '/etc/config/ddnsto' "$rootfs/lib/upgrade/keep.d/ddnsto"
 grep -q 'https://mirror.nju.edu.cn/openwrt' \
 	"$rootfs/etc/uci-defaults/99-fanchmwrt-repositories"
+grep -Fq 'cp -f /rom/etc/apk/world /etc/apk/world' \
+	"$rootfs/etc/uci-defaults/99-fanchmwrt-repositories"
 
 grep -Fxq 'SAVE_OVERLAY=1' "$source_dir/package/base-files/files/sbin/sysupgrade"
 grep -Fxq 'SAVE_OVERLAY_PATH=/etc' "$source_dir/package/base-files/files/sbin/sysupgrade"
 grep -Fq 'sysupgrade -c -k "$image"' \
 	"$builder_root/assets/first-extroot-sysupgrade.sh"
 grep -Fxq 'SAVE_INSTALLED_PKGS=1' "$source_dir/package/base-files/files/sbin/sysupgrade"
+grep -Fq '"$workdir/etc/apk/world"' \
+	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade.sh"
+grep -Fq 'restore_unowned_files "$backup_dir/upper"' \
+	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade-run"
+grep -Fq 'collect_old_world_candidates "$backup_dir/upper"' \
+	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade-run"
 
 for script in \
 	"$source_dir/package/base-files/files/etc/uci-defaults/99-fanchmwrt-repositories" \

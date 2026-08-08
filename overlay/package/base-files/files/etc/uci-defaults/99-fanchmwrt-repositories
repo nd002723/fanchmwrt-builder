@@ -1,7 +1,14 @@
 #!/bin/sh
 
-# Repository definitions belong to the new firmware. Refresh them before
-# applying the configured mirror so old release paths cannot survive upgrade.
+# APK world and repository definitions belong to the new firmware. Keeping an
+# old world pins the previous base-files/kernel and blocks every future add.
+if [ -f /rom/etc/apk/world ]; then
+	mkdir -p /etc/apk || exit 1
+	cp -f /rom/etc/apk/world /etc/apk/world || exit 1
+fi
+
+# Refresh repository definitions before applying the configured mirror so old
+# release paths cannot survive upgrade.
 for repo_file in \
 	/etc/apk/repositories.d/distfeeds.list \
 	/etc/apk/repositories.d/customfeeds.list; do
@@ -15,4 +22,3 @@ for repo_file in \
 done
 
 exit 0
-

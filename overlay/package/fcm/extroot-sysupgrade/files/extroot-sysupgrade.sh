@@ -24,9 +24,10 @@ extroot_sysupgrade_prepare_backup() {
 	config_dir="$workdir/etc/config"
 	section="$(extroot_sysupgrade_overlay_section "$config_dir")"
 
-	# Always use repository definitions from the new firmware. The first-boot
-	# default copies them from /rom and applies the configured mirror.
+	# Always use APK state owned by the new firmware. The first-boot default
+	# copies world/repositories from /rom and applies the configured mirror.
 	rm -f \
+		"$workdir/etc/apk/world" \
 		"$workdir/etc/apk/repositories.d/distfeeds.list" \
 		"$workdir/etc/apk/repositories.d/customfeeds.list"
 
