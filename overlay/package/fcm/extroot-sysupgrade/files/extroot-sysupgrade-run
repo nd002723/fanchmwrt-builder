@@ -123,11 +123,18 @@ cleanup_backups() {
 	rm -f "$STATE_DIR/backup"
 }
 
+firmware_has_package() {
+	# /rom is the immutable new firmware. Its generated package lists are the
+	# on-device equivalent of the new image manifest.
+	[ -f "/rom/lib/apk/packages/$1.list" ]
+}
+
 ensure_package_manifest() {
-	local list old_packages old_retained package
+	local db_package list old_db old_packages old_retained package
 
 	old_packages="$1/lib/apk/packages"
 	old_retained="$1/etc/extroot-sysupgrade/package-lists"
+	old_db="$1/lib/apk/db/installed"
 	mkdir -p "${MANIFEST%/*}" || return 1
 	[ -r "$MANIFEST" ] || : > "$MANIFEST" || return 1
 
@@ -138,10 +145,26 @@ ensure_package_manifest() {
 		case "$package" in
 			''|*[!A-Za-z0-9+_.-]*) continue;;
 		esac
-		[ -f "/rom/lib/apk/packages/$package.list" ] && continue
+		firmware_has_package "$package" && continue
 		awk -v package="$package" '$1 == package { found=1 } END { exit !found }' \
 			"$MANIFEST" || printf '%s\toverlay\n' "$package" >> "$MANIFEST" || return 1
 	done
+
+	# Runtime-installed packages can be present in the APK database without a
+	# generated /lib/apk/packages list. Add only names missing from the saved
+	# sysupgrade manifest, whose existing rom entries remain authoritative.
+	if [ -r "$old_db" ]; then
+		for db_package in $(awk -F: '$1 == "P" { print $2 }' "$old_db"); do
+			package="$db_package"
+			case "$package" in
+				''|*[!A-Za-z0-9+_.-]*) continue;;
+			esac
+			awk -v package="$package" '$1 == package { found=1 } END { exit !found }' \
+				"$MANIFEST" && continue
+			firmware_has_package "$package" && continue
+			printf '%s\toverlay\n' "$package" >> "$MANIFEST" || return 1
+		done
+	fi
 
 	log "updated the user package manifest from the previous external upper"
 }
@@ -201,7 +224,7 @@ retain_unmanifested_packages() {
 		case "$package" in
 			''|*[!A-Za-z0-9+_.-]*) continue;;
 		esac
-		[ -f "/rom/lib/apk/packages/$package.list" ] && continue
+		firmware_has_package "$package" && continue
 		grep -Fxq "$package" "$retained" && continue
 
 		while IFS= read -r path; do
@@ -243,7 +266,7 @@ retain_unmanifested_packages() {
 			case "$package" in
 				''|*[!A-Za-z0-9+_.-]*) continue;;
 			esac
-			[ -f "/rom/lib/apk/packages/$package.list" ] && continue
+			firmware_has_package "$package" && continue
 			grep -Fxq "$package" "$retained" && continue
 			generated="$list_dir/$package.list"
 			awk -F: -v wanted="$package" '
@@ -286,46 +309,82 @@ retain_unmanifested_packages() {
 	log "retained package files that are absent from the new firmware"
 }
 
-world_package_names() {
-	awk '
-		match($0, /^[A-Za-z0-9][A-Za-z0-9+_.-]*/) {
-			print substr($0, RSTART, RLENGTH)
-		}' "$1" | sort -u
+old_package_origin() {
+	local package
+
+	package="$1"
+	[ -r "$STATE_DIR/apk-db/installed" ] || return 1
+	awk -F: -v wanted="$package" '
+		$1 == "P" { active=($2 == wanted); next }
+		active && $1 == "o" { print substr($0, 3); exit }
+	' "$STATE_DIR/apk-db/installed"
 }
 
-collect_old_world_candidates() {
-	local candidates new_names old_names old_upper package
+repository_package_origin() {
+	apk query --fields origin --format json --from repositories "$1" 2>/dev/null |
+		jsonfilter -e '@[0].origin' 2>/dev/null
+}
+
+repository_origin_matches_old() {
+	local old_origin package repository_origin
+
+	package="$1"
+	old_origin="$(old_package_origin "$package")"
+	repository_origin="$(repository_package_origin "$package")"
+	if [ -n "$old_origin" ] && [ "$old_origin" = "$repository_origin" ]; then
+		return 0
+	fi
+	log "refusing repository replacement for $package: old origin '${old_origin:-unknown}', repository origin '${repository_origin:-unknown}'"
+	return 1
+}
+
+collect_replaced_package_paths() {
+	local db firmware_packages list old_lists old_retained old_upper output package
 
 	old_upper="$1"
-	candidates="$STATE_DIR/world_candidates"
-	new_names="$STATE_DIR/new_world_packages"
-	old_names="$STATE_DIR/old_world_packages"
-	: > "$candidates" || return 1
+	output="$2"
+	old_lists="$old_upper/lib/apk/packages"
+	old_retained="$old_upper/etc/extroot-sysupgrade/package-lists"
+	db="$old_upper/lib/apk/db/installed"
+	firmware_packages="$STATE_DIR/firmware_packages"
+	: > "$output" || return 1
+	: > "$firmware_packages" || return 1
 
-	[ -r "$old_upper/etc/apk/world" ] || {
-		log "old APK world is unavailable; package manifests remain authoritative"
-		return 0
-	}
-	[ -r /etc/apk/world ] || {
-		log "new firmware APK world is unavailable"
-		return 1
-	}
+	for list in /rom/lib/apk/packages/*.list; do
+		[ -f "$list" ] || continue
+		package="${list##*/}"
+		printf '%s\n' "${package%.list}" >> "$firmware_packages" || return 1
+	done
 
-	world_package_names /etc/apk/world > "$new_names" || return 1
-	world_package_names "$old_upper/etc/apk/world" > "$old_names" || return 1
-	while IFS= read -r package; do
-		[ -n "$package" ] || continue
-		grep -Fxq "$package" "$new_names" && continue
-		printf '%s\n' "$package" >> "$candidates" || return 1
-	done < "$old_names"
+	# Build-time file lists also cover packages absent from the old APK database.
+	for list in "$old_lists"/*.list "$old_retained"/*.list; do
+		[ -f "$list" ] || continue
+		package="${list##*/}"
+		package="${package%.list}"
+		firmware_has_package "$package" || continue
+		awk '/^\// && $0 !~ /(^|\/)\.\.($|\/)/ { print }' "$list" >> "$output" || return 1
+	done
 
-	sort -u "$candidates" > "$candidates.new" && mv "$candidates.new" "$candidates" || return 1
-	rm -f "$new_names" "$old_names"
-	log "collected $(wc -l < "$candidates") package names missing from the new firmware world"
+	if [ -r "$db" ]; then
+		awk -F: '
+			FNR == NR { firmware[$1]=1; next }
+			$1 == "P" { active=firmware[$2]; directory=""; next }
+			!active { next }
+			$1 == "F" { directory=$0; sub(/^F:/, "", directory); next }
+			$1 == "R" {
+				file=$0; sub(/^R:/, "", file)
+				if (file == "" || file == "S") next
+				if (directory == "") print "/" file
+				else print "/" directory "/" file
+			}' "$firmware_packages" "$db" >> "$output" || return 1
+	fi
+
+	sed 's#//\+#/#g' "$output" | sort -u > "$output.new" && mv "$output.new" "$output" || return 1
+	rm -f "$firmware_packages"
 }
 
 restore_unowned_files() {
-	local candidates copied dest old_upper path src
+	local ancestor blocked candidates copied dest old_upper parent path replaced skipped src
 
 	old_upper="$1"
 	[ -d "$old_upper" ] || {
@@ -335,7 +394,11 @@ restore_unowned_files() {
 
 	candidates="$STATE_DIR/unowned_candidates"
 	copied="$STATE_DIR/restored_unowned_files"
+	replaced="$STATE_DIR/replaced_package_paths"
+	skipped="$STATE_DIR/skipped_unowned_files"
 	: > "$copied" || return 1
+	: > "$skipped" || return 1
+	collect_replaced_package_paths "$old_upper" "$replaced" || return 1
 	find "$old_upper" -xdev \( -type f -o -type l \) -print > "$candidates" || return 1
 
 	while IFS= read -r src; do
@@ -351,12 +414,35 @@ restore_unowned_files() {
 				continue
 			;;
 		esac
+		# A package present in the new firmware is authoritative as a whole.
+		# Runtime-created files are not in this list and remain recoverable.
+		grep -Fxq "$path" "$replaced" && continue
 
 		# The merged root includes both the new firmware and packages restored
 		# above. Never replace either a file or a dangling symlink from them.
 		[ ! -e "$path" ] && [ ! -L "$path" ] || continue
 		dest="$path"
-		mkdir -p "${dest%/*}" || {
+		parent="${dest%/*}"
+		ancestor="$parent"
+		blocked=0
+		while [ ! -d "$ancestor" ]; do
+			if [ -e "$ancestor" ] || [ -L "$ancestor" ]; then
+				blocked=1
+				break
+			fi
+			[ "$ancestor" != / ] || break
+			ancestor="${ancestor%/*}"
+			[ -n "$ancestor" ] || ancestor=/
+		done
+		if [ "$blocked" -eq 1 ]; then
+			printf '%s\n' "$path" >> "$skipped" || {
+				rm -f "$candidates"
+				return 1
+			}
+			log "skipping unowned file because its parent conflicts with the new root: $path"
+			continue
+		fi
+		mkdir -p "$parent" || {
 			rm -f "$candidates"
 			return 1
 		}
@@ -372,6 +458,8 @@ restore_unowned_files() {
 
 	rm -f "$candidates"
 	log "restored $(wc -l < "$copied") unowned files without replacing new firmware files"
+	[ ! -s "$skipped" ] ||
+		log "skipped $(wc -l < "$skipped") unowned files whose parent paths conflict with the new root"
 }
 
 prepare_external_overlay() {
@@ -478,7 +566,7 @@ retry_extroot_enable() {
 }
 
 restore_packages() {
-	local archive backup_dir backup_ref failed need_repositories package packages repositories_available retained world_candidates
+	local archive backup_dir backup_ref failed need_repositories package packages repositories_available retained user_packages
 
 	extroot_is_active || fail "fresh extroot is not active; package restore was not started"
 	[ -r "$MANIFEST" ] || fail "installed package manifest is missing"
@@ -487,7 +575,7 @@ restore_packages() {
 	packages="$STATE_DIR/packages"
 	failed="$STATE_DIR/failed_packages"
 	retained="$STATE_DIR/retained_packages"
-	world_candidates="$STATE_DIR/world_candidates"
+	user_packages="$STATE_DIR/user_packages"
 	backup_ref="$(read_state backup)"
 	case "$backup_ref" in
 		"$BACKUP_ROOT"/*) ;;
@@ -497,16 +585,20 @@ restore_packages() {
 		;;
 	esac
 	backup_dir="/overlay/$backup_ref"
-	collect_old_world_candidates "$backup_dir/upper" || {
-		log "cannot collect package candidates from the old APK world"
-		return 1
-	}
 	{
 		awk '$2 == "overlay" { print $1 }' "$MANIFEST"
 		[ -r "$retained" ] && cat "$retained"
-		[ -r "$world_candidates" ] && cat "$world_candidates"
+	} | sort -u | while IFS= read -r package; do
+		[ -n "$package" ] || continue
+		firmware_has_package "$package" && continue
+		printf '%s\n' "$package"
+	done > "$user_packages"
+	{
+		cat "$user_packages"
 		printf '%s\n' luci-app-fwx-app-center
 	} | sort -u > "$packages"
+	cat "$user_packages" >> "$retained" || return 1
+	sort -u "$retained" > "$retained.new" && mv "$retained.new" "$retained" || return 1
 	: > "$failed"
 
 	need_repositories=0
@@ -536,6 +628,7 @@ restore_packages() {
 		apk info -e "$package" >/dev/null 2>&1 && continue
 		if grep -Fxq "$package" "$retained" 2>/dev/null; then
 			if [ "$repositories_available" -eq 1 ] &&
+				repository_origin_matches_old "$package" &&
 				apk add "$package" >> "$STATE_DIR/restore.log" 2>&1 &&
 				apk info -e "$package" >/dev/null 2>&1; then
 				log "registered retained package from the new repository: $package"
@@ -556,10 +649,6 @@ restore_packages() {
 			continue
 		fi
 		[ "$repositories_available" -eq 1 ] || {
-			if grep -Fxq "$package" "$world_candidates" 2>/dev/null; then
-				log "keeping unavailable old-world candidate outside the active APK world: $package"
-				continue
-			fi
 			echo "$package" >> "$failed"
 			continue
 		}
@@ -567,11 +656,7 @@ restore_packages() {
 		if apk add "$package" >> "$STATE_DIR/restore.log" 2>&1; then
 			continue
 		fi
-		if grep -Fxq "$package" "$world_candidates" 2>/dev/null; then
-			log "old-world candidate is not installable from the new repositories: $package"
-		else
-			echo "$package" >> "$failed"
-		fi
+		echo "$package" >> "$failed"
 	done < "$packages"
 
 	restore_unowned_files "$backup_dir/upper" || {

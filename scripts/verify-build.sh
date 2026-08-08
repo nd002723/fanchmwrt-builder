@@ -51,7 +51,15 @@ grep -Fq '"$workdir/etc/apk/world"' \
 	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade.sh"
 grep -Fq 'restore_unowned_files "$backup_dir/upper"' \
 	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade-run"
-grep -Fq 'collect_old_world_candidates "$backup_dir/upper"' \
+grep -Fq 'skipping unowned file because its parent conflicts with the new root' \
+	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade-run"
+grep -Fq 'awk '\''$2 == "overlay" { print $1 }'\'' "$MANIFEST"' \
+	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade-run"
+grep -Fq 'repository_origin_matches_old "$package"' \
+	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade-run"
+grep -Fq 'firmware_has_package "$package" && continue' \
+	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade-run"
+grep -Fq 'grep -Fxq "$path" "$replaced" && continue' \
 	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade-run"
 
 for script in \

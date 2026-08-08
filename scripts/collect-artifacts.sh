@@ -43,10 +43,14 @@ Upgrade policy:
 - downloads.openwrt.org is replaced with mirror.nju.edu.cn/openwrt.
 - the external /overlay mount is re-enabled before the activation reboot.
 - old external upper/work directories are kept until package restoration succeeds.
+- packages already present in the new firmware manifest are authoritative and are not restored from the old upper.
 - packages absent from the new firmware are retained without importing the old APK database.
-- the new APK resolver re-registers packages from the new repositories or cached APK files.
-- old world entries are reduced to package-name candidates; raw version/checksum constraints are never merged.
-- unowned regular files and symlinks are restored only when the new root has no matching path.
+- retained packages are re-registered from repositories only when the old and new package origins match.
+- packages with missing or changed origins are installed only from the preserved APK cache.
+- user packages come from the old sysupgrade manifest's overlay entries plus retained APK database records.
+- the old world and its raw version/checksum constraints are never merged or used for automatic installs.
+- unowned regular files and symlinks are restored only when the new root has no matching path and
+  the path was not registered to an old package replaced by the new firmware.
 - failed migrations retain backups for rollback; successful migrations remove them.
 - use first-extroot-sysupgrade.sh for the first upgrade from firmware without this package.
 EOF
