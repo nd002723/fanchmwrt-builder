@@ -22,11 +22,15 @@ read_state() {
 }
 
 discover_overlay_section() {
-	local sections
+	local section sections
 
 	sections="$(uci -q show fstab | sed -n \
 		"s/^fstab\.\([^.=]*\)\.target='\/overlay'$/\1/p")"
-	set -- $sections
+	set --
+	for section in $sections; do
+		[ "$(uci -q get "fstab.$section.enabled")" = "0" ] && continue
+		set -- "$@" "$section"
+	done
 	[ "$#" -le 1 ] || return 1
 	[ "$#" -eq 0 ] && return 0
 	printf '%s\n' "$1"
@@ -69,7 +73,7 @@ bootstrap_state() {
 
 	[ -r "$STATE_DIR/phase" ] && return 0
 	section="$(discover_overlay_section)" || {
-		log "multiple /overlay mount sections are configured; refusing automatic migration"
+		log "multiple enabled /overlay mount sections are configured; refusing automatic migration"
 		return 1
 	}
 	[ -n "$section" ] || return 0
@@ -91,7 +95,7 @@ overlay_section() {
 	section="$(read_state section)"
 	[ -n "$section" ] || return 1
 	configured="$(discover_overlay_section)" || return 1
-	[ "$configured" = "$section" ] || return 1
+	[ -z "$configured" ] || [ "$configured" = "$section" ] || return 1
 	uci -q get "fstab.$section.target" | grep -qx /overlay || return 1
 	printf '%s\n' "$section"
 }

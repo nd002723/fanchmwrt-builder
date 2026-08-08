@@ -1,12 +1,16 @@
 #!/bin/sh
 
 extroot_sysupgrade_overlay_section() {
-	local config_dir sections
+	local config_dir section sections
 
 	config_dir="$1"
 	sections="$(uci -q -c "$config_dir" show fstab | sed -n \
 		"s/^fstab\.\([^.=]*\)\.target='\/overlay'$/\1/p")"
-	set -- $sections
+	set --
+	for section in $sections; do
+		[ "$(uci -q -c "$config_dir" get "fstab.$section.enabled")" = "0" ] && continue
+		set -- "$@" "$section"
+	done
 	[ "$#" -le 1 ] || return 1
 	[ "$#" -eq 0 ] && return 0
 	printf '%s\n' "$1"
@@ -28,7 +32,7 @@ extroot_sysupgrade_prepare_backup() {
 
 	config_dir="$workdir/etc/config"
 	section="$(extroot_sysupgrade_overlay_section "$config_dir")" || {
-		echo "Multiple /overlay mount sections are configured; refusing sysupgrade." >&2
+		echo "Multiple enabled /overlay mount sections are configured; refusing sysupgrade." >&2
 		rm -rf "$workdir"
 		return 1
 	}

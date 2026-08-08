@@ -1,5 +1,20 @@
 #!/bin/sh
 
+first_extroot_overlay_section() {
+	local section sections
+
+	sections="$(uci -q show fstab | sed -n \
+		"s/^fstab\.\([^.=]*\)\.target='\/overlay'$/\1/p")"
+	set --
+	for section in $sections; do
+		[ "$(uci -q get "fstab.$section.enabled")" = "0" ] && continue
+		set -- "$@" "$section"
+	done
+	[ "$#" -le 1 ] || return 1
+	[ "$#" -eq 0 ] && return 0
+	printf '%s\n' "$1"
+}
+
 image="$1"
 
 usage() {
@@ -13,8 +28,10 @@ case "$image" in
 	*) [ -f "$image" ] || usage;;
 esac
 
-section="$(uci -q show fstab | sed -n \
-	"s/^fstab\.\([^.=]*\)\.target='\/overlay'$/\1/p" | head -n 1)"
+section="$(first_extroot_overlay_section)" || {
+	echo "Multiple enabled /overlay mount sections are configured; refusing sysupgrade." >&2
+	exit 1
+}
 
 if [ -z "$section" ]; then
 	exec sysupgrade -c -k "$image"
