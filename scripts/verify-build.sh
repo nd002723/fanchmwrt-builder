@@ -34,6 +34,7 @@ done < "$builder_root/configs/required-packages.txt"
 rootfs="$(find "$source_dir/build_dir" -maxdepth 3 -type d -name 'root-*' -print | head -n 1)"
 [[ -n "$rootfs" ]] || { echo "Root filesystem staging directory not found" >&2; exit 1; }
 test -x "$rootfs/usr/libexec/extroot-sysupgrade"
+test -r "$rootfs/usr/libexec/extroot-device.sh"
 test -x "$rootfs/usr/libexec/package-manager-call"
 test -x "$rootfs/etc/uci-defaults/99-fanchmwrt-repositories"
 grep -Fxq '/etc/config/ddnsto' "$rootfs/lib/upgrade/keep.d/ddnsto"
@@ -65,14 +66,20 @@ grep -Fq 'multiple enabled /overlay mount sections are configured' \
 	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade-run"
 grep -Fq 'overlay_device_identity_matches "$section" "$device"' \
 	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade-run"
+grep -Fq 'repair_active_overlay_config || fail' \
+	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade-run"
+grep -Fq 'extroot_repair_active_section "$config_dir"' \
+	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade.sh"
 bash "$builder_root/scripts/test-extroot-overlay-selection.sh" \
 	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade-run" \
 	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade.sh" \
-	"$builder_root/assets/first-extroot-sysupgrade.sh"
+	"$builder_root/assets/first-extroot-sysupgrade.sh" \
+	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-device.sh"
 
 for script in \
 	"$source_dir/package/base-files/files/etc/uci-defaults/99-fanchmwrt-repositories" \
 	"$source_dir/package/fcm/extroot-sysupgrade/files/95-extroot-sysupgrade" \
+	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-device.sh" \
 	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade.init" \
 	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade-run" \
 	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade.sh" \

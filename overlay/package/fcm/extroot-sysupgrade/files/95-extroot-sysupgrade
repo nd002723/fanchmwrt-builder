@@ -2,22 +2,30 @@
 
 STATE_DIR=/etc/extroot-sysupgrade
 
+. /usr/libexec/extroot-device.sh
+
 [ ! -e "$STATE_DIR/phase" ] || exit 0
 
-sections="$(uci -q show fstab | sed -n \
-	"s/^fstab\.\([^.=]*\)\.target='\/overlay'$/\1/p")"
-set --
-for section in $sections; do
-	[ "$(uci -q get "fstab.$section.enabled")" = "0" ] && continue
-	set -- "$@" "$section"
-done
-[ "$#" -le 1 ] || {
+section="$(extroot_enabled_overlay_section "")"
+status=$?
+[ "$status" -ne 2 ] || {
 	logger -t extroot-sysupgrade -- \
 		"multiple enabled /overlay mount sections are configured; refusing automatic migration"
 	exit 1
 }
-[ "$#" -eq 1 ] || exit 0
-section="$1"
+if [ -z "$section" ]; then
+	section="$(extroot_repair_active_section "")"
+	status=$?
+	case "$status" in
+		0) logger -t extroot-sysupgrade -- "restored enabled=1 for the active extroot mount";;
+		1) exit 0;;
+		*)
+			logger -t extroot-sysupgrade -- \
+				"active /overlay identity is unsafe or ambiguous; refusing automatic migration"
+			exit 1
+		;;
+	esac
+fi
 uuid="$(uci -q get "fstab.$section.uuid")"
 if [ -n "$uuid" ]; then
 	case "$uuid" in
@@ -41,12 +49,17 @@ fi
 actual="$(awk '$2 == "/overlay" { print $1; exit }' /proc/mounts)"
 if [ -n "$device" ] && [ -n "$actual" ] &&
 	[ "$(readlink -f "$device")" = "$(readlink -f "$actual")" ]; then
+	device_uuid="$(extroot_active_uuid_for_section "" "$section")" || exit 1
+	extroot_write_device_marker "$device_uuid" || exit 1
+	mkdir -p "$STATE_DIR" || exit 1
+	printf '%s\n' "$device_uuid" > "$STATE_DIR/device_uuid" || exit 1
 	exit 0
 fi
 
 mkdir -p "$STATE_DIR" || exit 1
 printf '%s\n' "$section" > "$STATE_DIR/section" || exit 1
 printf '%s\n' prepare > "$STATE_DIR/phase" || exit 1
+[ -z "$uuid" ] || printf '%s\n' "$(extroot_uuid_normalize "$uuid")" > "$STATE_DIR/device_uuid" || exit 1
 logger -t extroot-sysupgrade -- \
 	"initialized migration state after sysupgrade configuration restore"
 

@@ -43,6 +43,8 @@ Upgrade policy:
 - downloads.openwrt.org is replaced with mirror.nju.edu.cn/openwrt.
 - the external /overlay mount is re-enabled before the activation reboot.
 - at most one enabled /overlay mount is allowed; disabled internal-overlay entries are ignored.
+- an active standard extroot with a uniquely matching UUID is re-enabled automatically if its fstab flag is 0.
+- active extroot UUID state is recorded on the external filesystem and checked again before migration.
 - an invalid, missing, or non-unique configured UUID stops migration instead of falling back to /dev/sdX.
 - old external upper/work directories are kept until package restoration succeeds.
 - packages already present in the new firmware manifest are authoritative and are not restored from the old upper.

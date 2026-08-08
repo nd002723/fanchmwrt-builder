@@ -7,6 +7,8 @@ BACKUP_ROOT=.extroot-sysupgrade-backups
 TAG=extroot-sysupgrade
 APK_CACHE_DIR=$STATE_DIR/apk-cache
 
+. /usr/libexec/extroot-device.sh
+
 log() {
 	logger -t "$TAG" -- "$*"
 	echo "$TAG: $*"
@@ -22,18 +24,45 @@ read_state() {
 }
 
 discover_overlay_section() {
-	local section sections
+	extroot_enabled_overlay_section ""
+}
 
-	sections="$(uci -q show fstab | sed -n \
-		"s/^fstab\.\([^.=]*\)\.target='\/overlay'$/\1/p")"
-	set --
-	for section in $sections; do
-		[ "$(uci -q get "fstab.$section.enabled")" = "0" ] && continue
-		set -- "$@" "$section"
-	done
-	[ "$#" -le 1 ] || return 1
-	[ "$#" -eq 0 ] && return 0
-	printf '%s\n' "$1"
+repair_active_overlay_config() {
+	local phase section status uuid
+
+	phase="$(read_state phase || true)"
+	case "$phase" in
+		prepare|reinstall|reboot) return 0;;
+	esac
+
+	section="$(discover_overlay_section)"
+	status=$?
+	[ "$status" -ne 2 ] || {
+		log "multiple enabled /overlay mount sections are configured; refusing automatic repair"
+		return 1
+	}
+	if [ -n "$section" ]; then
+		uuid="$(extroot_active_uuid_for_section "" "$section")" || return 0
+		extroot_write_device_marker "$uuid" || return 1
+		mkdir -p "$STATE_DIR" || return 1
+		printf '%s\n' "$uuid" > "$STATE_DIR/device_uuid" || return 1
+		return 0
+	fi
+
+	section="$(extroot_repair_active_section "")"
+	status=$?
+	case "$status" in
+		0) ;;
+		1) return 0;;
+		*)
+			log "active /overlay identity is unsafe or ambiguous; refusing automatic repair"
+			return 1
+		;;
+	esac
+	uuid="$(extroot_active_uuid_for_section "" "$section")" || return 1
+	mkdir -p "$STATE_DIR" || return 1
+	printf '%s\n' "$uuid" > "$STATE_DIR/device_uuid" || return 1
+	log "restored enabled=1 for active extroot section $section"
 }
 
 configured_overlay_device() {
@@ -493,7 +522,7 @@ restore_unowned_files() {
 }
 
 prepare_external_overlay() {
-	local actual backup_dir backup_id device section
+	local actual backup_dir backup_id device device_uuid marker section state_uuid
 
 	extroot_is_active && fail "old extroot is still active; refusing to migrate a live upper directory"
 	[ -d /overlay/upper ] || fail "internal overlay upper directory is unavailable"
@@ -509,6 +538,44 @@ prepare_external_overlay() {
 		! overlay_device_identity_matches "$section" "$device"; then
 		umount "$MOUNT_DIR" 2>/dev/null || true
 		fail "mounted external overlay does not match its configured UUID"
+	fi
+	device_uuid="$(block info "$device" 2>/dev/null |
+		sed -n 's#^.* UUID="\([^"]*\)".*#\1#p' | head -n 1)"
+	extroot_uuid_valid "$device_uuid" || {
+		umount "$MOUNT_DIR"
+		fail "mounted external overlay has no valid UUID"
+	}
+	device_uuid="$(extroot_uuid_normalize "$device_uuid")"
+	state_uuid="$(read_state device_uuid)"
+	if [ -n "$state_uuid" ]; then
+		extroot_uuid_valid "$state_uuid" &&
+			[ "$(extroot_uuid_normalize "$state_uuid")" = "$device_uuid" ] || {
+				umount "$MOUNT_DIR"
+				fail "mounted external overlay does not match the saved migration UUID"
+			}
+	else
+		mkdir -p "$STATE_DIR" || {
+			umount "$MOUNT_DIR"
+			fail "cannot save the external overlay UUID"
+		}
+		printf '%s\n' "$device_uuid" > "$STATE_DIR/device_uuid" || {
+			umount "$MOUNT_DIR"
+			fail "cannot save the external overlay UUID"
+		}
+	fi
+	marker="$MOUNT_DIR/.extroot-sysupgrade-device-uuid"
+	if [ -e "$marker" ]; then
+		state_uuid="$(sed -n '1p' "$marker")"
+		extroot_uuid_valid "$state_uuid" &&
+			[ "$(extroot_uuid_normalize "$state_uuid")" = "$device_uuid" ] || {
+				umount "$MOUNT_DIR"
+				fail "external overlay disk marker does not match the mounted UUID"
+			}
+	else
+		printf '%s\n' "$device_uuid" > "$marker" || {
+			umount "$MOUNT_DIR"
+			fail "cannot create the external overlay disk marker"
+		}
 	fi
 
 	[ -d "$MOUNT_DIR/upper" ] || {
@@ -564,6 +631,7 @@ prepare_external_overlay() {
 	}
 	printf '%s\n' reinstall > "$MOUNT_DIR/upper/etc/extroot-sysupgrade/phase"
 	printf '%s\n' "$BACKUP_ROOT/$backup_id" > "$MOUNT_DIR/upper/etc/extroot-sysupgrade/backup"
+	printf '%s\n' "$device_uuid" > "$MOUNT_DIR/upper/etc/extroot-sysupgrade/device_uuid"
 
 	set_overlay_enabled "$MOUNT_DIR/upper/etc/config" "$section" || {
 		rollback_external "$backup_dir"
@@ -715,6 +783,7 @@ restore_packages() {
 main() {
 	local phase
 
+	repair_active_overlay_config || fail "cannot validate or repair the active extroot configuration"
 	bootstrap_state || fail "cannot bootstrap migration state"
 	phase="$(read_state phase)"
 	case "$phase" in

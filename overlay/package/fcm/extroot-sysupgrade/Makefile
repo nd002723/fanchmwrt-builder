@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=extroot-sysupgrade
-PKG_RELEASE:=11
+PKG_RELEASE:=12
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -27,6 +27,7 @@ define Package/extroot-sysupgrade/install
 	$(INSTALL_BIN) ./files/95-extroot-sysupgrade $(1)/etc/uci-defaults/95-extroot-sysupgrade
 	$(INSTALL_DATA) ./files/extroot-sysupgrade.sh $(1)/lib/upgrade/90-extroot-sysupgrade.sh
 	echo /etc/config/ddnsto > $(1)/lib/upgrade/keep.d/ddnsto
+	$(INSTALL_DATA) ./files/extroot-device.sh $(1)/usr/libexec/extroot-device.sh
 	$(INSTALL_BIN) ./files/extroot-sysupgrade-run $(1)/usr/libexec/extroot-sysupgrade
 endef
 
