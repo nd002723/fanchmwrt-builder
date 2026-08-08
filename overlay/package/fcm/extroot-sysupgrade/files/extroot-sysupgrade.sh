@@ -1,10 +1,15 @@
 #!/bin/sh
 
 extroot_sysupgrade_overlay_section() {
-	local config_dir="$1"
+	local config_dir sections
 
-	uci -q -c "$config_dir" show fstab | sed -n \
-		"s/^fstab\.\([^.=]*\)\.target='\/overlay'$/\1/p" | head -n 1
+	config_dir="$1"
+	sections="$(uci -q -c "$config_dir" show fstab | sed -n \
+		"s/^fstab\.\([^.=]*\)\.target='\/overlay'$/\1/p")"
+	set -- $sections
+	[ "$#" -le 1 ] || return 1
+	[ "$#" -eq 0 ] && return 0
+	printf '%s\n' "$1"
 }
 
 extroot_sysupgrade_prepare_backup() {
@@ -22,7 +27,11 @@ extroot_sysupgrade_prepare_backup() {
 	}
 
 	config_dir="$workdir/etc/config"
-	section="$(extroot_sysupgrade_overlay_section "$config_dir")"
+	section="$(extroot_sysupgrade_overlay_section "$config_dir")" || {
+		echo "Multiple /overlay mount sections are configured; refusing sysupgrade." >&2
+		rm -rf "$workdir"
+		return 1
+	}
 
 	# Always use APK state owned by the new firmware. The first-boot default
 	# copies world/repositories from /rom and applies the configured mirror.

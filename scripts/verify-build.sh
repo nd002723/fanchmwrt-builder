@@ -61,6 +61,10 @@ grep -Fq 'firmware_has_package "$package" && continue' \
 	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade-run"
 grep -Fq 'grep -Fxq "$path" "$replaced" && continue' \
 	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade-run"
+grep -Fq 'multiple /overlay mount sections are configured' \
+	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade-run"
+grep -Fq 'overlay_device_identity_matches "$section" "$device"' \
+	"$source_dir/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade-run"
 
 for script in \
 	"$source_dir/package/base-files/files/etc/uci-defaults/99-fanchmwrt-repositories" \

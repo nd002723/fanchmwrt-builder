@@ -42,6 +42,8 @@ Upgrade policy:
 - firmware-owned APK world and repository files are refreshed from /rom on first boot.
 - downloads.openwrt.org is replaced with mirror.nju.edu.cn/openwrt.
 - the external /overlay mount is re-enabled before the activation reboot.
+- exactly one /overlay mount is required; its UUID takes precedence over a raw device path.
+- an invalid, missing, or non-unique configured UUID stops migration instead of falling back to /dev/sdX.
 - old external upper/work directories are kept until package restoration succeeds.
 - packages already present in the new firmware manifest are authoritative and are not restored from the old upper.
 - packages absent from the new firmware are retained without importing the old APK database.

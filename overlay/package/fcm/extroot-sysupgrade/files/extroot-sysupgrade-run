@@ -22,32 +22,56 @@ read_state() {
 }
 
 discover_overlay_section() {
-	uci -q show fstab | sed -n \
-		"s/^fstab\.\([^.=]*\)\.target='\/overlay'$/\1/p" | head -n 1
+	local sections
+
+	sections="$(uci -q show fstab | sed -n \
+		"s/^fstab\.\([^.=]*\)\.target='\/overlay'$/\1/p")"
+	set -- $sections
+	[ "$#" -le 1 ] || return 1
+	[ "$#" -eq 0 ] && return 0
+	printf '%s\n' "$1"
 }
 
 configured_overlay_device() {
-	local section="$1" device uuid
+	local device devices section uuid
+
+	section="$1"
+	uuid="$(uci -q get "fstab.$section.uuid")"
+	if [ -n "$uuid" ]; then
+		case "$uuid" in
+			*[!A-Fa-f0-9-]*) return 1;;
+		esac
+		devices="$(block info | sed -n "s#^\([^:]*\):.* UUID=\"$uuid\".*#\1#p")"
+		set -- $devices
+		[ "$#" -eq 1 ] && [ -b "$1" ] || return 1
+		readlink -f "$1"
+		return
+	fi
 
 	device="$(uci -q get "fstab.$section.device")"
-	[ -b "$device" ] && {
-		readlink -f "$device"
-		return
-	}
+	[ -b "$device" ] || return 1
+	readlink -f "$device"
+}
 
+overlay_device_identity_matches() {
+	local actual device section uuid
+
+	section="$1"
+	device="$2"
 	uuid="$(uci -q get "fstab.$section.uuid")"
-	case "$uuid" in
-		''|*[!A-Fa-f0-9-]*) return 1;;
-	esac
-
-	block info | sed -n "s#^\([^:]*\):.* UUID=\"$uuid\".*#\1#p" | head -n 1
+	[ -n "$uuid" ] || return 0
+	actual="$(block info "$device" 2>/dev/null | sed -n 's#^.* UUID="\([^"]*\)".*#\1#p' | head -n 1)"
+	[ -n "$actual" ] && [ "$actual" = "$uuid" ]
 }
 
 bootstrap_state() {
 	local actual device section
 
 	[ -r "$STATE_DIR/phase" ] && return 0
-	section="$(discover_overlay_section)"
+	section="$(discover_overlay_section)" || {
+		log "multiple /overlay mount sections are configured; refusing automatic migration"
+		return 1
+	}
 	[ -n "$section" ] || return 0
 	device="$(configured_overlay_device "$section")"
 	[ -n "$device" ] || return 0
@@ -62,10 +86,12 @@ bootstrap_state() {
 }
 
 overlay_section() {
-	local section
+	local configured section
 
 	section="$(read_state section)"
 	[ -n "$section" ] || return 1
+	configured="$(discover_overlay_section)" || return 1
+	[ "$configured" = "$section" ] || return 1
 	uci -q get "fstab.$section.target" | grep -qx /overlay || return 1
 	printf '%s\n' "$section"
 }
@@ -463,7 +489,7 @@ restore_unowned_files() {
 }
 
 prepare_external_overlay() {
-	local backup_dir backup_id device section
+	local actual backup_dir backup_id device section
 
 	extroot_is_active && fail "old extroot is still active; refusing to migrate a live upper directory"
 	[ -d /overlay/upper ] || fail "internal overlay upper directory is unavailable"
@@ -473,6 +499,13 @@ prepare_external_overlay() {
 	device="$(overlay_device)" || fail "external overlay block device was not found"
 	mkdir -p "$MOUNT_DIR" || fail "cannot create temporary mount directory"
 	mount "$device" "$MOUNT_DIR" || fail "cannot mount $device"
+	actual="$(awk -v target="$MOUNT_DIR" '$2 == target { print $1; exit }' /proc/mounts)"
+	if [ -z "$actual" ] ||
+		[ "$(readlink -f "$actual")" != "$(readlink -f "$device")" ] ||
+		! overlay_device_identity_matches "$section" "$device"; then
+		umount "$MOUNT_DIR" 2>/dev/null || true
+		fail "mounted external overlay does not match its configured UUID"
+	fi
 
 	[ -d "$MOUNT_DIR/upper" ] || {
 		umount "$MOUNT_DIR"
