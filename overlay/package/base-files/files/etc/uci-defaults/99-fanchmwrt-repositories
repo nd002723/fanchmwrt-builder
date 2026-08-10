@@ -21,4 +21,34 @@ for repo_file in \
 		"$repo_file" || exit 1
 done
 
+# MiniUPnPd disables port mappings when the WAN address is private by default.
+# This is common when the device is used as a downstream router.  OpenWrt's
+# init wrapper does not currently expose the daemon option, so teach it to
+# write the option before enabling it in UCI.  Keep this idempotent in case a
+# future upstream version adds native support.
+miniupnpd_init=/etc/init.d/miniupnpd
+if [ -f "$miniupnpd_init" ] && \
+	! grep -q 'upnpd_write_bool ext_allow_private_ipv4' "$miniupnpd_init"; then
+	sed -i \
+		'/upnpd_write_bool use_stun 0 ext_perform_stun/a\
+\t\tupnpd_write_bool ext_allow_private_ipv4 0' \
+		"$miniupnpd_init" || exit 1
+fi
+
+# With ext_allow_private_ipv4 enabled, MiniUPnPd 2.3.9 otherwise returns an
+# empty ExternalIPAddress.  Resolve it from the logical WAN whenever the
+# service is generated so DHCP renewals do not leave a hard-coded address.
+if [ -f "$miniupnpd_init" ] && \
+	! grep -q 'network_get_ipaddr external_ip' "$miniupnpd_init"; then
+	sed -i \
+		'/echo "ext_ifname6=\$ifname6"/a\
+\t\t[ -n "$external_ip" ] || network_get_ipaddr external_ip "$external_iface"' \
+		"$miniupnpd_init" || exit 1
+fi
+
+if uci -q get upnpd.config >/dev/null 2>&1; then
+	uci set upnpd.config.ext_allow_private_ipv4='1' || exit 1
+	uci commit upnpd || exit 1
+fi
+
 exit 0
