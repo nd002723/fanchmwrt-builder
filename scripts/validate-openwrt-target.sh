@@ -30,7 +30,7 @@ dump_script="$source_dir/scripts/dump-target-info.pl"
 
 [[ -f "$target_dir/Makefile" && -f "$dump_script" ]] || {
 	echo "OpenWrt target does not exist: $target" >&2
-	exit 1
+	exit 10
 }
 
 if ! target_info="$(
@@ -39,7 +39,7 @@ if ! target_info="$(
 		DUMP=1 TARGET_BUILD=1 SUBTARGET="$subtarget" 2>/dev/null
 )"; then
 	echo "OpenWrt could not load target: $target/$subtarget" >&2
-	exit 1
+	exit 11
 fi
 
 selected_target="$(
@@ -52,7 +52,7 @@ arch_packages="$(
 )"
 if [[ "$selected_target" != "$target/$subtarget" || -z "$arch_packages" ]]; then
 	echo "OpenWrt subtarget does not exist: $target/$subtarget" >&2
-	exit 1
+	exit 11
 fi
 
 device_info="$(
@@ -62,7 +62,7 @@ device_info="$(
 if ! printf '%s\n' "$device_info" |
 	awk -v requested="$profile" '$1 == requested { found = 1 } END { exit !found }'; then
 	echo "OpenWrt device profile does not exist: $target/$subtarget/$profile" >&2
-	exit 1
+	exit 12
 fi
 
 case "$architecture:$arch_packages" in
@@ -71,7 +71,7 @@ case "$architecture:$arch_packages" in
 	x86:i386*|x86:x86_64*) ;;
 	*)
 		echo "Architecture mismatch: requested $architecture, target uses $arch_packages" >&2
-		exit 1
+		exit 13
 		;;
 esac
 

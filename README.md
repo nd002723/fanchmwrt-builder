@@ -12,6 +12,8 @@
 4. 提交后等待 Bot 校验。通过审核时，Bot 会回复 Actions 链接。
 5. 构建成功后下载 artifact；Bot 会在 Issue 中回复结果并自动关闭。
 
+自动额度已占满时，有效申请会进入 `build-queued` 队列且暂不计数。已有构建失败或取消后，Bot 会自动启动最早的队列申请；当天额度全部成功使用后，剩余申请改由仓库所有者审核。
+
 常见目标：
 
 ```text
@@ -20,7 +22,7 @@ NanoPi R5C: arm    / rockchip / armv8  / friendlyarm_nanopi-r5c
 x86-64:     x86    / x86      / 64     / generic
 ```
 
-目标必须使用所选上游版本中的 OpenWrt 原始命名。不确定 profile 时请先查阅上游配置，不要按相似设备名称猜测。
+目标必须使用 FanchmWrt 或本项目设备补丁支持的 OpenWrt 原始命名。不确定 profile 时请先查阅目标配置，不要按相似设备名称猜测。
 
 ## 下载和刷写
 

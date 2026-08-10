@@ -11,7 +11,7 @@
 - 首次启动时将 OpenWrt 下载地址替换为南京大学镜像
 - mipsel、32/64 位 ARM 和 x86 构建支持
 
-完整必选包见 [`configs/required-packages.txt`](configs/required-packages.txt)。设备能否构建取决于所选上游版本是否提供对应 target、subtarget 和 profile。
+完整必选包见 [`configs/required-packages.txt`](configs/required-packages.txt)。构建器优先使用所选 FanchmWrt 版本原生提供的 target、subtarget 和 profile；只有原生目标缺失时才调用设备补丁仓库。原生目标不依赖补丁仓库，补丁目标在仓库不存在、版本不兼容或应用失败时会在正式编译前被拒绝。
 
 ## 构建参数
 
@@ -69,7 +69,9 @@ Bot 会在编译前检查模板格式、上游版本、target、subtarget、prof
 - 编辑 Issue 或重复评论
 - 30 天内已有相同设备目标和相同上游 commit 的成功构建，且 artifact 仍可下载
 
-重复构建申请会收到原 Issue 和 Actions 链接。新的有效申请一经自动批准就会计数；之后因上游源码、feeds 或下载问题失败时不退还额度。
+重复构建申请会收到原 Issue 和 Actions 链接。新的有效申请通过自动批准后会占用额度；构建失败或取消会释放对应额度。
+
+当全仓库自动额度均被正在运行或已经成功的构建占用时，新的有效申请会标记为 `build-queued`，排队期间不占额度。Bot 每 5 分钟以及每次构建结束后检查队列；出现失败或取消时自动启动最早的队列申请。若当天的自动额度均已成功完成，剩余队列申请会改为 `needs-owner-review`，等待仓库所有者决定是否添加 `approved-build`。
 
 普通用户不能自行添加 `approved-build` 标签。未自动批准的有效申请可等待额度恢复，或由仓库所有者人工批准。
 
@@ -148,6 +150,7 @@ git clone https://github.com/nd002723/fanchmwrt-builder.git
 cd fanchmwrt-builder
 git clone https://github.com/fanchmwrt/fanchmwrt.git source
 ./scripts/prepare-source.sh source
+bash ./scripts/resolve-device-profile.sh source ramips mt7621 xiaoyu_xy-c5 mipsel
 cd source
 ./scripts/feeds update -a
 ./scripts/feeds install -a

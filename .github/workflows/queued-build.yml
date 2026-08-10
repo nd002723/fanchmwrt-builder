@@ -1,0 +1,305 @@
+name: Build Queued Firmware Request
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Queued firmware request issue number
+        required: true
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+
+concurrency:
+  group: queued-firmware-issue-${{ inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  parse:
+    name: Revalidate queued request
+    runs-on: ubuntu-22.04
+    outputs:
+      upstream_ref: ${{ steps.upstream.outputs.result }}
+      architecture: ${{ steps.request.outputs.architecture }}
+      target: ${{ steps.request.outputs.target }}
+      subtarget: ${{ steps.request.outputs.subtarget }}
+      profile: ${{ steps.request.outputs.profile }}
+      requester: ${{ steps.issue.outputs.requester }}
+    steps:
+      - name: Checkout builder
+        uses: actions/checkout@v4
+
+      - name: Load queued issue
+        id: issue
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        with:
+          script: |
+            const issueNumber = Number.parseInt(process.env.ISSUE_NUMBER, 10);
+            if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
+              core.setFailed('Invalid queued issue number');
+              return;
+            }
+            const response = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber
+            });
+            const labels = response.data.labels.map(label =>
+              typeof label === 'string' ? label : label.name
+            );
+            if (response.data.state !== 'open' ||
+                !labels.includes('build-firmware') ||
+                !labels.includes('build-dispatching')) {
+              core.setFailed('Issue is not an active dispatched firmware request');
+              return;
+            }
+            core.setOutput('title', response.data.title || '');
+            core.setOutput('body', response.data.body || '');
+            core.setOutput('requester', response.data.user.login);
+
+      - name: Parse build request
+        id: request
+        env:
+          ISSUE_TITLE: ${{ steps.issue.outputs.title }}
+          ISSUE_BODY: ${{ steps.issue.outputs.body }}
+        run: python3 scripts/parse-build-issue.py
+
+      - name: Resolve upstream ref
+        id: upstream
+        uses: actions/github-script@v7
+        env:
+          UPSTREAM_REF: ${{ steps.request.outputs.upstream_ref }}
+        with:
+          result-encoding: string
+          script: |
+            const commit = await github.rest.repos.getCommit({
+              owner: 'fanchmwrt',
+              repo: 'fanchmwrt',
+              ref: process.env.UPSTREAM_REF
+            });
+            return commit.data.sha;
+
+      - name: Checkout upstream target metadata
+        uses: actions/checkout@v4
+        with:
+          repository: fanchmwrt/fanchmwrt
+          ref: ${{ steps.upstream.outputs.result }}
+          path: target-source
+          fetch-depth: 1
+
+      - name: Resolve FanchmWrt device profile
+        env:
+          TARGET: ${{ steps.request.outputs.target }}
+          SUBTARGET: ${{ steps.request.outputs.subtarget }}
+          PROFILE: ${{ steps.request.outputs.profile }}
+          ARCHITECTURE: ${{ steps.request.outputs.architecture }}
+          DEVICE_BACKPORT_REPOSITORY: ${{ vars.DEVICE_BACKPORT_REPOSITORY || 'nd002723/fanchmwrt-device-backports' }}
+          DEVICE_BACKPORT_REF: ${{ vars.DEVICE_BACKPORT_REF || 'main' }}
+        run: bash ./scripts/resolve-device-profile.sh target-source "$TARGET" "$SUBTARGET" "$PROFILE" "$ARCHITECTURE"
+
+      - name: Mark queue request approved
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          REQUESTER: ${{ steps.issue.outputs.requester }}
+          UPSTREAM_REF: ${{ steps.request.outputs.upstream_ref }}
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.result }}
+          ARCHITECTURE: ${{ steps.request.outputs.architecture }}
+          TARGET: ${{ steps.request.outputs.target }}
+          SUBTARGET: ${{ steps.request.outputs.subtarget }}
+          PROFILE: ${{ steps.request.outputs.profile }}
+        with:
+          script: |
+            const issueNumber = Number(process.env.ISSUE_NUMBER);
+            const current = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber
+            });
+            const currentLabels = current.data.labels.map(label =>
+              typeof label === 'string' ? label : label.name
+            );
+            if (current.data.state !== 'open' || !currentLabels.includes('build-dispatching')) {
+              core.setFailed('Queue reservation was removed before build approval');
+              return;
+            }
+            async function removeLabel(name) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  name
+                });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+            }
+            await removeLabel('build-queued');
+            await removeLabel('needs-owner-review');
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              labels: ['approved-build']
+            });
+            const utcDate = new Date().toISOString().slice(0, 10);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              `<!-- fanchmwrt-auto-approved date=${utcDate} requester=${process.env.REQUESTER} -->`,
+              '等待队列已有名额释放，Bot 已重新校验参数并开始编译。',
+              '',
+              `- 申请者：@${process.env.REQUESTER}`,
+              `- 上游版本：\`${process.env.UPSTREAM_REF}\``,
+              `- 上游提交：\`${process.env.UPSTREAM_SHA}\``,
+              `- 架构：\`${process.env.ARCHITECTURE}\``,
+              `- 目标：\`${process.env.TARGET}/${process.env.SUBTARGET}/${process.env.PROFILE}\``,
+              `- [查看 Actions 运行](${runUrl})`
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body
+            });
+            await removeLabel('build-dispatching');
+
+  build:
+    name: Build promoted queued firmware
+    needs: parse
+    uses: ./.github/workflows/build.yml
+    with:
+      upstream_ref: ${{ needs.parse.outputs.upstream_ref }}
+      architecture: ${{ needs.parse.outputs.architecture }}
+      target: ${{ needs.parse.outputs.target }}
+      subtarget: ${{ needs.parse.outputs.subtarget }}
+      profile: ${{ needs.parse.outputs.profile }}
+
+  report:
+    name: Report queued build result
+    needs:
+      - parse
+      - build
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Update issue and queue
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          PARSE_RESULT: ${{ needs.parse.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          UPSTREAM_COMMIT: ${{ needs.build.outputs.upstream_commit }}
+          ARCHITECTURE: ${{ needs.parse.outputs.architecture }}
+          TARGET: ${{ needs.parse.outputs.target }}
+          SUBTARGET: ${{ needs.parse.outputs.subtarget }}
+          PROFILE: ${{ needs.parse.outputs.profile }}
+        with:
+          script: |
+            const crypto = require('crypto');
+            const issueNumber = Number.parseInt(process.env.ISSUE_NUMBER, 10);
+            if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
+              core.setFailed('Invalid queued issue number');
+              return;
+            }
+            async function removeLabel(name) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  name
+                });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+            }
+
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            if (process.env.PARSE_RESULT !== 'success') {
+              const current = await github.rest.issues.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber
+              });
+              const labels = current.data.labels.map(label =>
+                typeof label === 'string' ? label : label.name
+              );
+              const ownerTookOver = labels.includes('approved-build') &&
+                !labels.includes('build-dispatching');
+              if (!ownerTookOver) {
+                await removeLabel('build-dispatching');
+                await removeLabel('build-queued');
+                await removeLabel('approved-build');
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  labels: ['needs-owner-review']
+                });
+              }
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: ownerTookOver
+                  ? `队列派发已停止，此申请已经由仓库所有者接管。\n\n[查看 Actions 运行](${runUrl})`
+                  : `队列申请重新校验失败，已转为仓库所有者审核。\n\n[查看 Actions 运行](${runUrl})`
+              });
+            } else {
+              let summary;
+              let marker = '';
+              if (process.env.BUILD_RESULT === 'success') {
+                summary = '队列中的固件构建成功，产物可从本次 Actions 运行中下载。';
+                const identity = [
+                  process.env.UPSTREAM_COMMIT,
+                  process.env.ARCHITECTURE,
+                  process.env.TARGET,
+                  process.env.SUBTARGET,
+                  process.env.PROFILE
+                ].join('\n');
+                const fingerprint = crypto.createHash('sha256').update(identity).digest('hex');
+                marker = `<!-- fanchmwrt-build fingerprint=${fingerprint} -->\n`;
+              } else if (process.env.BUILD_RESULT === 'cancelled') {
+                marker = `<!-- fanchmwrt-auto-slot-released run=${context.runId} -->\n`;
+                summary = '队列中的固件构建已取消，自动构建额度已经释放。';
+              } else {
+                marker = `<!-- fanchmwrt-auto-slot-released run=${context.runId} -->\n`;
+                summary = '队列中的固件构建失败，自动构建额度已经释放。';
+              }
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: `${marker}${summary}\n\n[查看 Actions 运行](${runUrl})`
+              });
+              if (process.env.BUILD_RESULT === 'success') {
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  state: 'closed',
+                  state_reason: 'completed'
+                });
+              }
+            }
+
+            try {
+              const repository = await github.rest.repos.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo
+              });
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'queue-controller.yml',
+                ref: repository.data.default_branch
+              });
+            } catch (error) {
+              core.warning(`Queue controller dispatch failed; scheduled reconciliation will retry: ${error.message}`);
+            }

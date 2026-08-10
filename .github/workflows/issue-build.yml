@@ -58,13 +58,15 @@ jobs:
           path: target-source
           fetch-depth: 1
 
-      - name: Validate OpenWrt target and device profile
+      - name: Resolve FanchmWrt device profile
         env:
           TARGET: ${{ steps.request.outputs.target }}
           SUBTARGET: ${{ steps.request.outputs.subtarget }}
           PROFILE: ${{ steps.request.outputs.profile }}
           ARCHITECTURE: ${{ steps.request.outputs.architecture }}
-        run: ./scripts/validate-openwrt-target.sh target-source "$TARGET" "$SUBTARGET" "$PROFILE" "$ARCHITECTURE"
+          DEVICE_BACKPORT_REPOSITORY: ${{ vars.DEVICE_BACKPORT_REPOSITORY || 'nd002723/fanchmwrt-device-backports' }}
+          DEVICE_BACKPORT_REF: ${{ vars.DEVICE_BACKPORT_REF || 'main' }}
+        run: bash ./scripts/resolve-device-profile.sh target-source "$TARGET" "$SUBTARGET" "$PROFILE" "$ARCHITECTURE"
 
       - name: Report accepted request
         uses: actions/github-script@v7
@@ -77,6 +79,18 @@ jobs:
           PROFILE: ${{ steps.request.outputs.profile }}
         with:
           script: |
+            for (const name of ['build-review-pending', 'build-queued', 'build-dispatching', 'needs-owner-review']) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  name
+                });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+            }
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const body = [
               '仓库所有者已批准此请求，参数校验通过并开始编译。',

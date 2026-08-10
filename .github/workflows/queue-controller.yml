@@ -1,0 +1,324 @@
+name: Reconcile Firmware Build Queue
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+
+concurrency:
+  group: firmware-build-queue-controller
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: Reconcile automatic build slots
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Promote or defer queued requests
+        uses: actions/github-script@v7
+        env:
+          GLOBAL_DAILY_LIMIT: ${{ vars.AUTO_BUILD_GLOBAL_DAILY || '3' }}
+          PER_USER_DAILY_LIMIT: ${{ vars.AUTO_BUILD_PER_USER_DAILY || '1' }}
+        with:
+          script: |
+            function positiveLimit(raw, fallback) {
+              const parsed = Number.parseInt(raw, 10);
+              return Number.isInteger(parsed) && parsed > 0 && parsed <= 50 ? parsed : fallback;
+            }
+
+            async function ensureLabel(name, color, description) {
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name
+                });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                try {
+                  await github.rest.issues.createLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    name,
+                    color,
+                    description
+                  });
+                } catch (createError) {
+                  if (createError.status !== 422) throw createError;
+                }
+              }
+            }
+
+            async function removeLabel(issueNumber, name) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  name
+                });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+            }
+
+            const globalLimit = positiveLimit(process.env.GLOBAL_DAILY_LIMIT, 3);
+            const perUserLimit = positiveLimit(process.env.PER_USER_DAILY_LIMIT, 1);
+            const now = new Date();
+            const utcDate = now.toISOString().slice(0, 10);
+            const todayStart = `${utcDate}T00:00:00.000Z`;
+            const staleBefore = new Date(now.getTime() - 30 * 60 * 1000);
+            const approvalPattern = /<!-- fanchmwrt-auto-approved date=(\d{4}-\d{2}-\d{2}) requester=([A-Za-z0-9-]+) -->/;
+            const releasePattern = /<!-- fanchmwrt-auto-slot-released run=(\d+) -->/;
+            const dispatchPattern = /<!-- fanchmwrt-queue-dispatch at=([^ ]+) -->/;
+            const runPattern = /\/actions\/runs\/(\d+)/;
+
+            await ensureLabel('build-queued', 'd4c5f9', 'Waiting for an automatic build slot');
+            await ensureLabel('build-dispatching', 'fbca04', 'Reserved automatic build slot');
+            await ensureLabel('build-review-pending', 'c5def5', 'Validated request waiting for queue review');
+            await ensureLabel('needs-owner-review', 'b60205', 'Requires repository owner approval');
+
+            const approvedIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              labels: 'approved-build',
+              since: todayStart,
+              per_page: 100
+            });
+            const approvalRuns = new Map();
+            const releasedRuns = new Set();
+            for (const issue of approvedIssues.filter(item => !item.pull_request)) {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                since: todayStart,
+                per_page: 100
+              });
+              for (const comment of comments) {
+                if (comment.user?.login !== 'github-actions[bot]') continue;
+                const approval = (comment.body || '').match(approvalPattern);
+                const release = (comment.body || '').match(releasePattern);
+                const run = (comment.body || '').match(runPattern);
+                if (approval?.[1] === utcDate && run) {
+                  approvalRuns.set(Number(run[1]), approval[2]);
+                }
+                if (release) releasedRuns.add(Number(release[1]));
+              }
+            }
+
+            let successful = 0;
+            let active = 0;
+            const userOccupied = new Map();
+            for (const [runId, requester] of approvalRuns) {
+              if (releasedRuns.has(runId)) continue;
+              try {
+                const run = await github.rest.actions.getWorkflowRun({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  run_id: runId
+                });
+                if (run.data.conclusion === 'success' || run.data.conclusion === null) {
+                  if (run.data.conclusion === 'success') successful++;
+                  else active++;
+                  userOccupied.set(requester, (userOccupied.get(requester) || 0) + 1);
+                }
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+            }
+
+            const pending = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'build-review-pending',
+              sort: 'created',
+              direction: 'asc',
+              per_page: 100
+            });
+            for (const issue of pending.filter(item => !item.pull_request)) {
+              await removeLabel(issue.number, 'build-review-pending');
+              const requester = issue.user.login;
+              if ((userOccupied.get(requester) || 0) >= perUserLimit) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: ['needs-owner-review']
+                });
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `申请者今天已达到自动批准上限（${perUserLimit} 次/UTC 日），本申请转为仓库所有者审核。`
+                });
+                continue;
+              }
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: ['build-queued']
+              });
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: '参数审核已通过，申请已进入自动构建队列，不占用额度。'
+              });
+            }
+
+            const dispatching = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'build-dispatching',
+              sort: 'created',
+              direction: 'asc',
+              per_page: 100
+            });
+            const liveDispatching = [];
+            for (const issue of dispatching.filter(item => !item.pull_request)) {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                per_page: 100
+              });
+              const reservations = comments
+                .filter(comment => comment.user?.login === 'github-actions[bot]')
+                .map(comment => (comment.body || '').match(dispatchPattern)?.[1])
+                .filter(Boolean)
+                .sort();
+              const reservedAt = reservations.at(-1);
+              if (reservedAt && new Date(reservedAt) >= staleBefore) {
+                liveDispatching.push(issue);
+                continue;
+              }
+              await removeLabel(issue.number, 'build-dispatching');
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: ['build-queued']
+              });
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: '之前的队列派发未能开始，Bot 已将此申请放回等待队列。'
+              });
+            }
+
+            const queued = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'build-queued',
+              sort: 'created',
+              direction: 'asc',
+              per_page: 100
+            });
+            const queuedIssues = queued.filter(item => !item.pull_request);
+
+            if (successful >= globalLimit && active === 0 && liveDispatching.length === 0) {
+              for (const issue of queuedIssues) {
+                await removeLabel(issue.number, 'build-queued');
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: ['needs-owner-review']
+                });
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `今天的 ${globalLimit} 个自动构建额度均已成功完成。本申请已转为仓库所有者审核；所有者确认后可添加 \`approved-build\` 标签。`
+                });
+              }
+              core.info(`Moved ${queuedIssues.length} queued requests to owner review`);
+              return;
+            }
+
+            const available = Math.max(0, globalLimit - successful - active - liveDispatching.length);
+            if (available === 0 || queuedIssues.length === 0) {
+              core.info(`No promotion: success=${successful}, active=${active}, dispatching=${liveDispatching.length}, queued=${queuedIssues.length}`);
+              return;
+            }
+
+            const repository = await github.rest.repos.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+            const selected = [];
+            const selectionUsers = new Map(userOccupied);
+            for (const issue of queuedIssues) {
+              const requester = issue.user.login;
+              if ((selectionUsers.get(requester) || 0) >= perUserLimit) {
+                await removeLabel(issue.number, 'build-queued');
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: ['needs-owner-review']
+                });
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `申请者今天已达到自动批准上限（${perUserLimit} 次/UTC 日），本申请转为仓库所有者审核。`
+                });
+                continue;
+              }
+              if (selected.length >= available) continue;
+              selected.push(issue);
+              selectionUsers.set(requester, (selectionUsers.get(requester) || 0) + 1);
+            }
+            if (selected.length === 0) {
+              core.info('No queue request is eligible for automatic promotion');
+              return;
+            }
+            for (const issue of selected) {
+              await removeLabel(issue.number, 'build-queued');
+              await removeLabel(issue.number, 'needs-owner-review');
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: ['build-dispatching']
+              });
+              const reservedAt = new Date().toISOString();
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `<!-- fanchmwrt-queue-dispatch at=${reservedAt} -->\n已有自动构建名额释放，Bot 正在按队列顺序启动此申请。`
+              });
+              try {
+                await github.rest.actions.createWorkflowDispatch({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  workflow_id: 'queued-build.yml',
+                  ref: repository.data.default_branch,
+                  inputs: { issue_number: String(issue.number) }
+                });
+              } catch (error) {
+                await removeLabel(issue.number, 'build-dispatching');
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: ['build-queued']
+                });
+                throw error;
+              }
+            }
+            core.info(`Dispatched ${selected.length} queued requests`);

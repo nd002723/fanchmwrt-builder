@@ -8,7 +8,7 @@ on:
       - reopened
 
 permissions:
-  actions: read
+  actions: write
   contents: read
   issues: write
 
@@ -18,18 +18,12 @@ jobs:
     if: >-
       github.event.issue.state == 'open' &&
       contains(github.event.issue.labels.*.name, 'build-firmware') &&
-      !contains(github.event.issue.labels.*.name, 'approved-build')
+      !contains(github.event.issue.labels.*.name, 'approved-build') &&
+      !contains(github.event.issue.labels.*.name, 'build-review-pending') &&
+      !contains(github.event.issue.labels.*.name, 'build-queued') &&
+      !contains(github.event.issue.labels.*.name, 'build-dispatching') &&
+      !contains(github.event.issue.labels.*.name, 'needs-owner-review')
     runs-on: ubuntu-22.04
-    concurrency:
-      group: firmware-request-auto-review
-      cancel-in-progress: false
-    outputs:
-      approved: ${{ steps.review.outputs.result }}
-      upstream_ref: ${{ steps.upstream.outputs.result }}
-      architecture: ${{ steps.request.outputs.architecture }}
-      target: ${{ steps.request.outputs.target }}
-      subtarget: ${{ steps.request.outputs.subtarget }}
-      profile: ${{ steps.request.outputs.profile }}
     steps:
       - name: Checkout builder
         uses: actions/checkout@v4
@@ -94,7 +88,7 @@ jobs:
           path: target-source
           fetch-depth: 1
 
-      - name: Validate OpenWrt target and device profile
+      - name: Resolve FanchmWrt device profile
         id: target
         if: steps.upstream.outcome == 'success'
         continue-on-error: true
@@ -103,7 +97,9 @@ jobs:
           SUBTARGET: ${{ steps.request.outputs.subtarget }}
           PROFILE: ${{ steps.request.outputs.profile }}
           ARCHITECTURE: ${{ steps.request.outputs.architecture }}
-        run: ./scripts/validate-openwrt-target.sh target-source "$TARGET" "$SUBTARGET" "$PROFILE" "$ARCHITECTURE"
+          DEVICE_BACKPORT_REPOSITORY: ${{ vars.DEVICE_BACKPORT_REPOSITORY || 'nd002723/fanchmwrt-device-backports' }}
+          DEVICE_BACKPORT_REF: ${{ vars.DEVICE_BACKPORT_REF || 'main' }}
+        run: bash ./scripts/resolve-device-profile.sh target-source "$TARGET" "$SUBTARGET" "$PROFILE" "$ARCHITECTURE"
 
       - name: Report invalid OpenWrt target
         if: steps.target.outcome != 'success' && steps.target.outcome != 'skipped'
@@ -123,32 +119,45 @@ jobs:
               body: `自动审核未通过：上游 OpenWrt 不识别目标 \`${requested}\`，或它与架构 \`${process.env.ARCHITECTURE}\` 不匹配。本次申请不会进入正式编译，也不计入每日额度。`
             });
 
-      - name: Check limits and approve
+      - name: Check duplicates and enqueue review
         id: review
         if: steps.target.outcome == 'success'
         uses: actions/github-script@v7
         env:
-          REQUESTER: ${{ github.event.issue.user.login }}
           UPSTREAM_REF: ${{ steps.request.outputs.upstream_ref }}
           UPSTREAM_SHA: ${{ steps.upstream.outputs.result }}
           ARCHITECTURE: ${{ steps.request.outputs.architecture }}
           TARGET: ${{ steps.request.outputs.target }}
           SUBTARGET: ${{ steps.request.outputs.subtarget }}
           PROFILE: ${{ steps.request.outputs.profile }}
-          PER_USER_DAILY_LIMIT: ${{ vars.AUTO_BUILD_PER_USER_DAILY || '1' }}
-          GLOBAL_DAILY_LIMIT: ${{ vars.AUTO_BUILD_GLOBAL_DAILY || '3' }}
         with:
           result-encoding: string
           script: |
             const crypto = require('crypto');
 
-            function positiveLimit(raw, fallback) {
-              const parsed = Number.parseInt(raw, 10);
-              return Number.isInteger(parsed) && parsed > 0 && parsed <= 50 ? parsed : fallback;
+            async function ensureLabel(name, color, description) {
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name
+                });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                try {
+                  await github.rest.issues.createLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    name,
+                    color,
+                    description
+                  });
+                } catch (createError) {
+                  if (createError.status !== 422) throw createError;
+                }
+              }
             }
 
-            const perUserLimit = positiveLimit(process.env.PER_USER_DAILY_LIMIT, 1);
-            const globalLimit = positiveLimit(process.env.GLOBAL_DAILY_LIMIT, 3);
             const upstreamSha = process.env.UPSTREAM_SHA;
             const identity = [
               upstreamSha,
@@ -159,7 +168,6 @@ jobs:
             ].join('\n');
             const fingerprint = crypto.createHash('sha256').update(identity).digest('hex');
             const now = new Date();
-            const utcDate = now.toISOString().slice(0, 10);
             const reuseCutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
             const approvedIssues = await github.paginate(
               github.rest.issues.listForRepo,
@@ -287,123 +295,32 @@ jobs:
               return 'duplicate';
             }
 
-            const markerPattern = /<!-- fanchmwrt-auto-approved date=(\d{4}-\d{2}-\d{2}) requester=([A-Za-z0-9-]+) -->/g;
-            const approvals = [];
-            for (const comment of botComments) {
-              for (const match of (comment.body || '').matchAll(markerPattern)) {
-                if (match[1] === utcDate) approvals.push({ requester: match[2] });
-              }
-            }
-            const userApprovals = approvals.filter(item => item.requester === process.env.REQUESTER).length;
-
-            let rejection = '';
-            if (userApprovals >= perUserLimit) {
-              rejection = `申请者今天已达到自动批准上限（${perUserLimit} 次/UTC 日）。`;
-            } else if (approvals.length >= globalLimit) {
-              rejection = `仓库今天已达到自动批准上限（${globalLimit} 次/UTC 日）。`;
-            }
-
-            if (rejection) {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: `自动审核暂未批准：${rejection}\n\n仓库所有者检查后仍可添加 \`approved-build\` 标签进行人工例外批准；也可以在下一个 UTC 日重新打开此 Issue 申请自动审核。`
-              });
-              return 'false';
-            }
-
+            await ensureLabel('build-review-pending', 'c5def5', 'Validated request waiting for queue review');
             await github.rest.issues.addLabels({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              labels: ['approved-build']
+              labels: ['build-review-pending']
             });
-
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const body = [
-              `<!-- fanchmwrt-auto-approved date=${utcDate} requester=${process.env.REQUESTER} -->`,
-              '自动审核通过，开始编译。',
-              '',
-              `- 申请者：@${process.env.REQUESTER}`,
-              `- 上游版本：\`${process.env.UPSTREAM_REF}\``,
-              `- 上游提交：\`${upstreamSha}\``,
-              `- 架构：\`${process.env.ARCHITECTURE}\``,
-              `- 目标：\`${process.env.TARGET}/${process.env.SUBTARGET}/${process.env.PROFILE}\``,
-              `- 自动限额：每人 ${perUserLimit} 次/UTC 日，全仓库 ${globalLimit} 次/UTC 日`,
-              `- [查看 Actions 运行](${runUrl})`
-            ].join('\n');
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body
+              body: `参数和重复构建检查已通过，Bot 正在按申请顺序分配自动构建名额。\n\n[查看审核运行](${runUrl})`
             });
-            return 'true';
-
-  build:
-    name: Build automatically approved firmware
-    needs: review
-    if: needs.review.outputs.approved == 'true'
-    uses: ./.github/workflows/build.yml
-    with:
-      upstream_ref: ${{ needs.review.outputs.upstream_ref }}
-      architecture: ${{ needs.review.outputs.architecture }}
-      target: ${{ needs.review.outputs.target }}
-      subtarget: ${{ needs.review.outputs.subtarget }}
-      profile: ${{ needs.review.outputs.profile }}
-
-  report:
-    name: Report final status
-    needs:
-      - review
-      - build
-    if: always() && needs.review.outputs.approved == 'true'
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Comment on issue
-        uses: actions/github-script@v7
-        env:
-          BUILD_RESULT: ${{ needs.build.result }}
-          UPSTREAM_COMMIT: ${{ needs.build.outputs.upstream_commit }}
-          ARCHITECTURE: ${{ needs.review.outputs.architecture }}
-          TARGET: ${{ needs.review.outputs.target }}
-          SUBTARGET: ${{ needs.review.outputs.subtarget }}
-          PROFILE: ${{ needs.review.outputs.profile }}
-        with:
-          script: |
-            const crypto = require('crypto');
-            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            let summary;
-            let marker = '';
-            if (process.env.BUILD_RESULT === 'success') {
-              summary = '自动批准的固件构建成功，产物可从本次 Actions 运行中下载。';
-              const identity = [
-                process.env.UPSTREAM_COMMIT,
-                process.env.ARCHITECTURE,
-                process.env.TARGET,
-                process.env.SUBTARGET,
-                process.env.PROFILE
-              ].join('\n');
-              const fingerprint = crypto.createHash('sha256').update(identity).digest('hex');
-              marker = `<!-- fanchmwrt-build fingerprint=${fingerprint} -->\n`;
-            } else if (process.env.BUILD_RESULT === 'cancelled') {
-              summary = '自动批准的固件构建已取消。';
-            } else {
-              summary = '自动批准的固件构建失败，请查看 Actions 日志。';
-            }
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: `${marker}${summary}\n\n[查看 Actions 运行](${runUrl})`
-            });
-            if (process.env.BUILD_RESULT === 'success') {
-              await github.rest.issues.update({
+            try {
+              const repository = await github.rest.repos.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo
+              });
+              await github.rest.actions.createWorkflowDispatch({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: context.issue.number,
-                state: 'closed',
-                state_reason: 'completed'
+                workflow_id: 'queue-controller.yml',
+                ref: repository.data.default_branch
               });
+            } catch (error) {
+              core.warning(`Queue controller dispatch failed; scheduled reconciliation will retry: ${error.message}`);
             }
+            return 'pending';
