@@ -14,12 +14,29 @@
 
 自动额度已占满时，有效申请会进入 `build-queued` 队列且暂不计数。已有构建失败或取消后，Bot 会自动启动最早的队列申请；当天额度全部成功使用后，剩余申请改由仓库所有者审核。
 
-常见目标：
+示例：
 
 ```text
-小娱 C5:    mipsel / ramips   / mt7621 / xiaoyu_xy-c5
-NanoPi R5C: arm    / rockchip / armv8  / friendlyarm_nanopi-r5c
-x86-64:     x86    / x86      / 64     / generic
+# 小娱 C5
+upstream_ref: fanchmwrt-25.12.4
+architecture: mipsel
+target:       ramips
+subtarget:    mt7621
+profile:      xiaoyu_xy-c5
+
+# NanoPi R5C
+upstream_ref: fanchmwrt-25.12.4
+architecture: arm
+target:       rockchip
+subtarget:    armv8
+profile:      friendlyarm_nanopi-r5c
+
+# x86-64
+upstream_ref: fanchmwrt-25.12.4
+architecture: x86
+target:       x86
+subtarget:    64
+profile:      generic
 ```
 
 目标必须使用 FanchmWrt 或本项目设备补丁支持的 OpenWrt 原始命名。不确定 profile 时请先查阅目标配置，不要按相似设备名称猜测。
