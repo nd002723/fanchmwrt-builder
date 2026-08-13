@@ -30,11 +30,11 @@ jobs:
       requester: ${{ steps.issue.outputs.requester }}
     steps:
       - name: Checkout builder
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Load queued issue
         id: issue
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           ISSUE_NUMBER: ${{ inputs.issue_number }}
         with:
@@ -71,7 +71,7 @@ jobs:
 
       - name: Resolve upstream ref
         id: upstream
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           UPSTREAM_REF: ${{ steps.request.outputs.upstream_ref }}
         with:
@@ -85,7 +85,7 @@ jobs:
             return commit.data.sha;
 
       - name: Checkout upstream target metadata
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: fanchmwrt/fanchmwrt
           ref: ${{ steps.upstream.outputs.result }}
@@ -103,7 +103,7 @@ jobs:
         run: bash ./scripts/resolve-device-profile.sh target-source "$TARGET" "$SUBTARGET" "$PROFILE" "$ARCHITECTURE"
 
       - name: Mark queue request approved
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           REQUESTER: ${{ steps.issue.outputs.requester }}
@@ -189,7 +189,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Update issue and queue
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           PARSE_RESULT: ${{ needs.parse.result }}

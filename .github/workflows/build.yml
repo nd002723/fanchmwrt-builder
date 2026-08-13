@@ -76,10 +76,10 @@ jobs:
 
     steps:
       - name: Checkout builder
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Checkout upstream FanchmWrt
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: fanchmwrt/fanchmwrt
           ref: ${{ inputs.upstream_ref }}

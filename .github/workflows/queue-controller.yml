@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Promote or defer queued requests
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           GLOBAL_DAILY_LIMIT: ${{ vars.AUTO_BUILD_GLOBAL_DAILY || '3' }}
           PER_USER_DAILY_LIMIT: ${{ vars.AUTO_BUILD_PER_USER_DAILY || '1' }}
