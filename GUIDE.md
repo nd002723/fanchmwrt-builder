@@ -11,11 +11,21 @@
 - 首次启动时将 OpenWrt 下载地址替换为南京大学镜像
 - mipsel、32/64 位 ARM 和 x86 构建支持
 
-完整必选包见 [`configs/required-packages.txt`](configs/required-packages.txt)。构建器优先使用所选 FanchmWrt 版本原生提供的 target、subtarget 和 profile；只有原生目标缺失时才调用设备补丁仓库。原生目标不依赖补丁仓库，补丁目标在仓库不存在、版本不兼容或应用失败时会在正式编译前被拒绝。
+完整必选包见 [`configs/required-packages.txt`](configs/required-packages.txt)。
 
-设备补丁仓库按版本分分支：每个受支持的版本有自己的分支（`v25.12.6`、`v25.12.4`……），`main` 指向最新版本。构建时用 `upstream_ref`（或 `upstream_ref_override`）同名分支去取补丁集；该分支不存在时自动回落到 `main`，补丁集的基线提交与所选版本不符时会在编译前明确报错。仓库变量 `DEVICE_BACKPORT_REF` 可以强制指定分支，优先级最高。
+设备解析固定三段，顺序不会因为任何开关而改变：
 
-补丁仓库每天检查上游新版本：新 tag 出现后，先把现有补丁集在该版本上试一遍，全部能应用就自动建同名分支，有补丁不适用就保持原状并让 Actions 运行标红，不会产出半成品分支。
+1. **上游优先**——所选 FanchmWrt 版本原生提供的 target、subtarget 和 profile 直接使用，不下载补丁仓库，也不打任何补丁。
+2. **补丁仓库兜底**——只有原生缺少该 profile 时才取补丁集并应用，然后**用同一份 target 元数据重新判定**一次。补丁仓库缺失、没有对应分支、补丁打不上、打上了但仍然没有这个 profile，都算「补丁仓库也给不出」。
+3. **报设备不存在**——两处都没有时按「检测不到设备」处理：编译开始前就停，申请被拒，并给出三段结论（上游没有、补丁仓库为什么不给）。这种情况不会被当作编译失败，也不会白跑一次编译。
+
+架构不匹配、target 名写错这类请求错误不进入第二段：补丁集改不了 ABI，直接按请求错误拒绝。
+
+设备补丁仓库按上游版本分分支：每个受支持的版本有自己的分支（`v25.12.6`、`v25.12.4`……），默认分支始终与最新版本同步。构建器会先把下拉里的 `fanchmwrt-<版本>` 换算成对应的 tag 名再去取补丁集——补丁仓库只按 tag 命名分支，不认 `fanchmwrt-` 前缀；该分支不存在时回落到默认分支，补丁集与所选版本不匹配时会说明原因并按「设备不存在」拒绝，不会静默降级去编译一个缺设备的树。仓库变量 `DEVICE_BACKPORT_REF` 可以强制指定分支，优先级最高。
+
+补丁仓库每天检查上游新版本：新 tag 出现后，先把现有补丁集在该版本上试一遍（先严格匹配，再试与 `apply.sh` 允许范围相同的 1–3 行 fuzz，最后才尝试重锚上下文），全部能应用就同时把同名分支和默认分支推到同一提交；有补丁不适用就保持原状并让 Actions 运行标红，不会产出半成品分支。
+
+本仓库的版本下拉也以上游为准：上游在 `manifest.json` 里声明某个维护分支需要停用时，该分支及其更早的同名分支会从选项里移除，默认值退回标签。
 
 ## 构建参数
 
@@ -35,21 +45,21 @@
 
 ```text
 # 小娱 C5
-upstream_ref: v25.12.6
+upstream_ref: fanchmwrt-25.12.6
 architecture: mipsel
 target:       ramips
 subtarget:    mt7621
 profile:      xiaoyu_xy-c5
 
 # NanoPi R5C
-upstream_ref: v25.12.6
+upstream_ref: fanchmwrt-25.12.6
 architecture: arm
 target:       rockchip
 subtarget:    armv8
 profile:      friendlyarm_nanopi-r5c
 
 # x86-64
-upstream_ref: v25.12.6
+upstream_ref: fanchmwrt-25.12.6
 architecture: x86
 target:       x86
 subtarget:    64
@@ -75,11 +85,15 @@ Bot 会在编译前检查模板格式、上游版本、target、subtarget、prof
 - 编辑 Issue 或重复评论
 - 30 天内已有相同设备目标和相同上游 commit 的成功构建，且 artifact 仍可下载
 
-重复构建申请会收到原 Issue 和 Actions 链接，并被自动关闭（关闭原因是已完成）。需要重新构建同一设备时请新建申请，不要重新打开旧的重复申请。新的有效申请通过自动批准后会占用额度；构建失败或取消会释放对应额度。
+重复构建申请会收到原 Issue 和 Actions 链接，并被自动关闭（关闭原因是已完成）；需要重新编译同一设备时新建申请，或由仓库所有者加 `approved-build` 与 `force-build` 跳过查重。新的有效申请通过自动批准后会占用额度；构建失败或取消会释放对应额度。
 
 当全仓库自动额度均被正在运行或已经成功的构建占用时，新的有效申请会标记为 `build-queued`，排队期间不占额度。Bot 每 5 分钟以及每次构建结束后检查队列；出现失败或取消时自动启动最早的队列申请。若当天的自动额度均已成功完成，剩余队列申请会改为 `needs-owner-review`，等待仓库所有者决定是否添加 `approved-build`。
 
+构建失败或取消的申请会打上黄色 `build-attention` 标签并保持打开，等待人工处理：看日志、改参数或由所有者加 `approved-build` 重试。重试被队列重新调度时该标签自动清除，不需要手动删。
+
 普通用户不能自行添加 `approved-build` 标签。未自动批准的有效申请可等待额度恢复，或由仓库所有者人工批准。
+
+标签的颜色和说明只有一份定义，在 `scripts/lib/labels.js`：四个 workflow 都从这里取，改色或改说明只需改一处，`scripts/test-labels.js` 会在 CI 里挡住写错的名字、颜色和超长说明。
 
 ## 构建产物
 
@@ -183,7 +197,7 @@ Package Manager 会显示保留但未注册的软件，并阻止将其当作普�
 1. Fork 本仓库。
 2. 在 Fork 的 Actions 页面启用 workflows。
 3. 打开 `Build FanchmWrt Firmware` 并选择 `Run workflow`。
-4. 上游版本与 Issue 模板共用同一份下拉列表（默认最新正式版 tag，随上游自动同步）；需要分支或特定提交时填写 `upstream_ref_override`。
+4. 上游版本与 Issue 模板共用同一份下拉列表（默认最新版本的维护分支，该版本没有维护分支时退回其 tag，随上游自动同步）；需要分支或特定提交时填写 `upstream_ref_override`。
 5. 填写其余构建参数并运行，从自己的 Actions 下载 artifact。
 
 Actions 用量和产物归 Fork 所有者，不占用本仓库额度。

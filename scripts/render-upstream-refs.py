@@ -99,6 +99,58 @@ def interleaved_choices(versions: list[str], branches: dict[str, str]) -> list[s
     return choices
 
 
+def parse_downgrades(path: str | None, versions: list[str]) -> dict[str, str]:
+    """Fold upstream's ``manifest.json`` maintenance table into a per-version map.
+
+    Upstream is authoritative: when it publishes a release that repairs the
+    private ``fanchmwrt-`` maintenance layer, the builder must stop offering that
+    branch until the repair. The mirror holds ``{"maintenance": {version:
+    behaviour}}`` where ``maintenance`` means "this release repaired the layer,
+    every older branch predates the repair" and ``silent`` means "this release has
+    no usable branch". A missing or unreadable mirror leaves every version
+    ``normal``.
+    """
+    claims: dict[str, str] = {}
+    if path:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except FileNotFoundError:
+            payload = {}
+        except (OSError, ValueError) as error:
+            fail(f"cannot read {path}: {error}")
+        table = payload.get("maintenance") if isinstance(payload, dict) else None
+        known = set(versions)
+        for version, entry in (table or {}).items() if isinstance(table, dict) else []:
+            behaviour = entry.get("behaviour") if isinstance(entry, dict) else entry
+            if behaviour == "normal":
+                continue
+            if behaviour not in {"maintenance", "silent"}:
+                fail(f"unknown downgrade behaviour {behaviour!r} for {version!r}")
+            if version not in known:
+                continue
+            claims[version] = behaviour
+    return {version: claims.get(version, "normal") for version in versions}
+
+
+def withheld(choice: str, versions: list[str], behaviours: dict[str, str]) -> bool:
+    """True when a maintenance branch must not be offered.
+
+    Two upstream claims withdraw a branch: ``silent`` on its own version (the
+    layer has no usable branch yet) and ``maintenance`` on a newer version (the
+    older branch predates the repair). The newest version is therefore only
+    withdrawn by its own ``silent`` claim.
+    """
+    if not choice.startswith("fanchmwrt-"):
+        return False
+    version = "v" + choice[len("fanchmwrt-"):]
+    if version not in versions:
+        return True
+    if behaviours.get(version) == "silent":
+        return True
+    return any(behaviours.get(later) == "maintenance" for later in versions[: versions.index(version)])
+
+
 def read_text(path: str) -> tuple[str, list[str]]:
     try:
         with open(path, encoding="utf-8", newline="") as handle:
@@ -155,6 +207,11 @@ def main() -> None:
     parser.add_argument("--issue-form", required=True, help="Issue Form YAML carrying the choices")
     parser.add_argument("--workflow-file", help="Workflow whose dispatch choices and default are refreshed")
     parser.add_argument("--limit", type=int, default=20, help="Maximum number of releases (default: 20)")
+    parser.add_argument(
+        "--downgrade",
+        metavar="PATH",
+        help="Mirror of the upstream manifest whose maintenance table withholds branches",
+    )
     parser.add_argument("--check", action="store_true", help="Report changes without writing any file")
     args = parser.parse_args()
 
@@ -165,7 +222,12 @@ def main() -> None:
     if not versions:
         fail("the upstream tag list contains no released version tag")
     branches = version_branches(load_names(args.branches)) if args.branches else {}
-    choices = interleaved_choices(versions, branches)
+    behaviours = parse_downgrades(args.downgrade, versions)
+    choices = [
+        choice
+        for choice in interleaved_choices(versions, branches)
+        if not withheld(choice, versions, behaviours)
+    ]
     if len(choices) > MAX_CHOICES:
         fail(f"{len(choices)} choices exceed the {MAX_CHOICES} the renderer allows")
     latest = versions[0]
@@ -173,7 +235,14 @@ def main() -> None:
     # fanchmwrt layer, so a stock configuration (fwxd, luci-app-fwx-app-center)
     # would fail verification on the very first default run. Fall back to the tag
     # only when that version has no branch.
+    withheld_branches = {choice for choice in branches.values() if withheld(choice, versions, behaviours)}
+    if withheld_branches:
+        print(f"withheld by upstream manifest: {', '.join(sorted(withheld_branches))}", file=sys.stderr)
+    # Prefer the maintenance branch, fall back to the bare tag when upstream says
+    # that branch carries no usable private layer yet.
     default_ref = branches.get(latest[1:], latest)
+    if default_ref in withheld_branches:
+        default_ref = latest
     # The Issue Form dropdown takes an index, the workflow_dispatch input takes a
     # name. The form's index 0 is the first choice, which is the maintenance
     # branch whenever the newest version has one -- the same rule as above, so

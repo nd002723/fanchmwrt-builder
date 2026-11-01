@@ -24,7 +24,8 @@ jobs:
       !contains(github.event.issue.labels.*.name, 'build-dispatching') &&
       !contains(github.event.issue.labels.*.name, 'needs-owner-review') &&
       !contains(github.event.issue.labels.*.name, 'duplicate') &&
-      !contains(github.event.issue.labels.*.name, 'force-build')
+      !contains(github.event.issue.labels.*.name, 'force-build') &&
+      !contains(github.event.issue.labels.*.name, 'build-attention')
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout builder
@@ -118,7 +119,13 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: `自动审核未通过：上游 OpenWrt 不识别目标 \`${requested}\`，或它与架构 \`${process.env.ARCHITECTURE}\` 不匹配。本次申请不会进入正式编译，也不计入每日额度。`
+              body: [
+                `自动审核未通过：检测不到设备 \`${requested}\`（架构 \`${process.env.ARCHITECTURE}\`）。`,
+                '',
+                '解析顺序是先看所选 FanchmWrt 版本，再看设备补丁仓库；两处都没有这个 profile，或它与架构不匹配。本次申请不会进入正式编译，也不计入每日额度。',
+                '',
+                '处理办法：确认 target、subtarget、profile 用的是 OpenWrt 原始命名；设备确实存在但没被收录时，请在设备补丁仓库补上再申请。'
+              ].join('\n')
             });
 
       - name: Check duplicates and enqueue review
@@ -135,173 +142,126 @@ jobs:
         with:
           result-encoding: string
           script: |
-            const crypto = require('crypto');
+            const { findDuplicate, planFor, reuseCutoff } = require('./scripts/lib/duplicate-build-guard.js');
+            const { ensureLabel } = require('./scripts/lib/labels.js');
+            const { owner, repo } = context.repo;
 
-            async function ensureLabel(name, color, description) {
-              try {
-                await github.rest.issues.getLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  name
-                });
-              } catch (error) {
-                if (error.status !== 404) throw error;
-                try {
-                  await github.rest.issues.createLabel({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    name,
-                    color,
-                    description
-                  });
-                } catch (createError) {
-                  if (createError.status !== 422) throw createError;
-                }
-              }
-            }
-
+            const upstreamRef = process.env.UPSTREAM_REF;
             const upstreamSha = process.env.UPSTREAM_SHA;
-            const identity = [
+            const fields = [
               upstreamSha,
               process.env.ARCHITECTURE,
               process.env.TARGET,
               process.env.SUBTARGET,
-              process.env.PROFILE
-            ].join('\n');
-            const fingerprint = crypto.createHash('sha256').update(identity).digest('hex');
-            const now = new Date();
-            const reuseCutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
+              process.env.PROFILE,
+              upstreamRef
+            ];
+            const cutoff = reuseCutoff(Date.now());
+
+            // Reuse window: only issues labelled `approved-build` can carry a
+            // success comment, and only comments inside the window matter.
             const approvedIssues = await github.paginate(
               github.rest.issues.listForRepo,
               {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                state: 'all',
-                labels: 'approved-build',
-                sort: 'updated',
-                direction: 'desc',
-                per_page: 100
+                owner, repo, state: 'all', labels: 'approved-build',
+                sort: 'updated', direction: 'desc', per_page: 100
               },
               (response, done) => {
                 const recent = response.data.filter(issue =>
-                  !issue.pull_request && issue.updated_at >= reuseCutoff
+                  !issue.pull_request && issue.updated_at >= cutoff
                 );
-                if (response.data.some(issue => issue.updated_at < reuseCutoff)) done();
+                if (response.data.some(issue => issue.updated_at < cutoff)) done();
                 return recent;
               }
             );
 
+            // `findDuplicate` needs the comments of those issues; fetch them in
+            // parallel and hand the module a plain world object.
             const commentGroups = await Promise.all(approvedIssues.map(async issue => ({
               issue,
               comments: await github.paginate(github.rest.issues.listComments, {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issue.number,
-                per_page: 100
+                owner, repo, issue_number: issue.number, per_page: 100
               })
             })));
-            const botComments = commentGroups.flatMap(group =>
-              group.comments
-                .filter(comment =>
-                  comment.user?.login === 'github-actions[bot]' &&
-                  comment.created_at >= reuseCutoff
-                )
-                .map(comment => ({ ...comment, issue_number: group.issue.number }))
-            );
-
-            const fingerprintPattern = /<!-- fanchmwrt-build fingerprint=([a-f0-9]{64}) -->/;
-            const runPattern = /\/actions\/runs\/(\d+)/;
-            const fingerprintedRuns = new Set();
-            for (const comment of botComments) {
-              const body = comment.body || '';
-              const runMatch = body.match(runPattern);
-              if (runMatch && fingerprintPattern.test(body)) fingerprintedRuns.add(runMatch[1]);
+            const world = { issues: new Map(), runs: new Map(), artifacts: new Map() };
+            for (const group of commentGroups) {
+              world.issues.set(group.issue.number, {
+                updated_at: group.issue.updated_at,
+                comments: group.comments.map(comment => ({
+                  user: comment.user?.login,
+                  created_at: comment.created_at,
+                  body: comment.body || ''
+                }))
+              });
             }
 
-            const expectedLegacyLines = [
-              `- 上游版本：\`${process.env.UPSTREAM_REF}\``,
-              `- 架构：\`${process.env.ARCHITECTURE}\``,
-              `- 目标：\`${process.env.TARGET}/${process.env.SUBTARGET}/${process.env.PROFILE}\``
-            ];
-            const candidates = [];
-            for (const comment of botComments) {
-              const body = comment.body || '';
-              const runMatch = body.match(runPattern);
-              if (!runMatch) continue;
-              const markerMatch = body.match(fingerprintPattern);
-              const exactMatch = markerMatch?.[1] === fingerprint;
-              const legacyMatch = !markerMatch &&
-                !fingerprintedRuns.has(runMatch[1]) &&
-                expectedLegacyLines.every(line => body.includes(line));
-              if (exactMatch || legacyMatch) {
-                candidates.push({
-                  run_id: Number(runMatch[1]),
-                  issue_number: comment.issue_number,
-                  created_at: comment.created_at
-                });
-              }
-            }
-            candidates.sort((left, right) => right.created_at.localeCompare(left.created_at));
-
-            let duplicate;
+            // Resolve only the runs the module actually asks about: a stale
+            // comment costs nothing when it does not survive the filters.
+            const { candidates } = planFor(fields.slice(0, 5), {
+              world,
+              candidateIssueNumber: context.issue.number,
+              cutoff
+            });
             for (const candidate of candidates) {
+              const key = String(candidate.run_id);
+              if (world.runs.has(key)) continue;
               try {
                 const run = await github.rest.actions.getWorkflowRun({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  run_id: candidate.run_id
+                  owner, repo, run_id: candidate.run_id
                 });
-                if (run.data.conclusion !== 'success') continue;
+                world.runs.set(key, { conclusion: run.data.conclusion });
                 const artifacts = await github.paginate(
                   github.rest.actions.listWorkflowRunArtifacts,
-                  {
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    run_id: candidate.run_id,
-                    per_page: 100
-                  }
+                  { owner, repo, run_id: candidate.run_id, per_page: 100 }
                 );
-                if (!artifacts.some(artifact => !artifact.expired)) continue;
-                duplicate = candidate;
-                break;
+                world.artifacts.set(key, artifacts);
               } catch (error) {
-                if (error.status === 404) continue;
-                throw error;
+                if (error.status !== 404) throw error;
+                world.runs.set(key, { missing: true });
               }
             }
+
+            const duplicate = findDuplicate({
+              current: fields.slice(0, 5),
+              candidate: { issueNumber: context.issue.number },
+              world,
+              cutoff,
+              upstreamRef
+            });
 
             if (duplicate) {
               await github.rest.issues.addLabels({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                labels: ['duplicate']
+                owner, repo, issue_number: context.issue.number, labels: ['duplicate']
               });
-              const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${duplicate.run_id}`;
-              const issueUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/issues/${duplicate.issue_number}`;
+              const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${duplicate.runId}`;
+              const issueUrl = `${context.serverUrl}/${owner}/${repo}/issues/${duplicate.issueNumber}`;
               const body = [
                 '检测到过去 30 天内已有相同设备和上游提交的成功构建，本申请不占用自动构建额度，也不会重复编译。',
                 '',
-                `- 上游版本：\`${process.env.UPSTREAM_REF}\``,
+                `- 上游版本：\`${upstreamRef}\``,
                 `- 上游提交：\`${upstreamSha}\``,
+                `- 架构：\`${process.env.ARCHITECTURE}\``,
                 `- 目标：\`${process.env.TARGET}/${process.env.SUBTARGET}/${process.env.PROFILE}\``,
-                `- [查看原申请 #${duplicate.issue_number}](${issueUrl})`,
+                `- [查看原申请 #${duplicate.issueNumber}](${issueUrl})`,
                 `- [下载之前的构建产物](${runUrl})`,
                 '',
-                '确实需要重新编译时：移除 `duplicate`，再由仓库所有者添加 `approved-build` 并配合 `force-build`。'
+                '确实需要重新编译时：新建一次申请；仓库所有者添加 `approved-build` 与 `force-build` 即可跳过查重。'
               ].join('\n');
               await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body
+                owner, repo, issue_number: context.issue.number, body
               });
-              // Left open for the same reason as the owner-approved path: closing
-              // would force a reopen just to relabel, and a reopen replays this job.
+              // Close it: a duplicate needs no pull request of its own, and the
+              // requester's next step starts from a new issue either way.
+              // Reopening is skipped by the job-level `if`, which already refuses
+              // issues carrying `duplicate`.
+              await github.rest.issues.update({
+                owner, repo, issue_number: context.issue.number,
+                state: 'closed', state_reason: 'completed'
+              });
               return 'duplicate';
             }
 
-            await ensureLabel('build-review-pending', 'c5def5', 'Validated request waiting for queue review');
+            await ensureLabel(github, context, 'build-review-pending');
             await github.rest.issues.addLabels({
               owner: context.repo.owner,
               repo: context.repo.repo,

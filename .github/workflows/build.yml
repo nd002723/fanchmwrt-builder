@@ -126,15 +126,73 @@ jobs:
       - name: Apply local upgrade and source customizations
         run: ./scripts/prepare-source.sh source
 
+      # The release name is what the backport repository keeps its branches under.
+      # `fanchmwrt-25.12.6` is a builder-side ref that has no counterpart there, so
+      # the tag is derived from it; anything else (a tag, a full commit) is passed
+      # through unchanged, and an empty value lets resolve-device-profile.sh pick
+      # the default branch before manifest.json validates it.
+      - name: Derive device backport ref
+        id: backport-ref
+        env:
+          REQUESTED_REF: ${{ vars.DEVICE_BACKPORT_REF }}
+          PINNED_REF: ${{ inputs.upstream_ref_override }}
+          SELECTED_REF: ${{ inputs.upstream_ref }}
+        run: |
+          set -euo pipefail
+          ref="${REQUESTED_REF:-${PINNED_REF:-${SELECTED_REF}}}"
+          if [[ "$ref" == fanchmwrt-* ]]; then
+            ref="v${ref#fanchmwrt-}"
+          fi
+          case "$ref" in
+            # Nothing usable to pin: let the script resolve the default branch.
+            ""|*[!A-Za-z0-9._/-]*|@*|*/|*..*) ref="" ;;
+            -*|*@*) ref="" ;;
+          esac
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "Device backport ref: ${ref:-<default branch>}"
+
       - name: Resolve FanchmWrt device profile
         env:
           TARGET: ${{ inputs.target }}
           SUBTARGET: ${{ inputs.subtarget }}
           PROFILE: ${{ inputs.profile }}
           ARCHITECTURE: ${{ inputs.architecture }}
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
           DEVICE_BACKPORT_REPOSITORY: ${{ vars.DEVICE_BACKPORT_REPOSITORY || 'nd002723/fanchmwrt-device-backports' }}
-          DEVICE_BACKPORT_REF: ${{ vars.DEVICE_BACKPORT_REF || inputs.upstream_ref_override || inputs.upstream_ref }}
-        run: bash ./scripts/resolve-device-profile.sh source "$TARGET" "$SUBTARGET" "$PROFILE" "$ARCHITECTURE"
+          # Backport branches are named after the release tag, never after the
+          # maintenance branch: `fanchmwrt-25.12.6` is a builder-side ref that the
+          # backport repository knows nothing about. Forcing the builder ref here
+          # made every default build fetch the default branch and fail the
+          # manifest check, so the ref is derived above instead.
+          DEVICE_BACKPORT_REF: ${{ steps.backport-ref.outputs.ref }}
+        run: |
+          set +e
+          bash ./scripts/resolve-device-profile.sh \
+            source "$TARGET" "$SUBTARGET" "$PROFILE" "$ARCHITECTURE"
+          status=$?
+          set -e
+          case "$status" in
+            0) ;;
+            # Stage 3 of the resolution chain: neither FanchmWrt nor the backport
+            # set provides this device. The compile was going to fail anyway, so
+            # stop here with the resolution report as the annotation instead of a
+            # compiler error. This is the same outcome the review stage reports as
+            # an unknown device.
+            21)
+              echo "::error title=Device not found::${TARGET}/${SUBTARGET}/${PROFILE} is not provided by ${UPSTREAM_REF} nor by the device backport set. See the step log for the full resolution report."
+              exit 21
+              ;;
+            # A malformed request or an architecture mismatch: also not a compile
+            # problem, and no patch series can repair it.
+            2|13)
+              echo "::error title=Invalid device request::${TARGET}/${SUBTARGET}/${PROFILE} was rejected with status $status before compiling. See the step log."
+              exit "$status"
+              ;;
+            *)
+              echo "::error title=Device resolution failed::resolving ${TARGET}/${SUBTARGET}/${PROFILE} failed with status $status. See the step log."
+              exit "$status"
+              ;;
+          esac
 
       - name: Free runner disk space
         run: |

@@ -323,6 +323,85 @@ else
 	fail_case "manual dispatch input is a choice list with a valid default"
 fi
 
+# --- upstream-declared maintenance downgrade ---------------------------------
+# Upstream owns the decision about its own maintenance layer. A release that
+# announces a repair must withdraw the older `fanchmwrt-<version>` branches,
+# otherwise the builder keeps offering a branch upstream already called stale.
+
+cp "$issue_form" "$work_dir/form-down.yml"
+cp "$workflow_file" "$work_dir/build-down.yml"
+cat > "$work_dir/manifest.json" <<'JSON'
+{
+  "schema_version": 1,
+  "maintenance": {
+    "v25.12.6": "maintenance",
+    "v25.12.5": "silent"
+  }
+}
+JSON
+
+if [[ "$(GITHUB_OUTPUT=/dev/null python3 "$renderer" \
+	--tags "$work_dir/tags.json" --branches "$work_dir/branches.json" \
+	--downgrade "$work_dir/manifest.json" \
+	--issue-form "$work_dir/form-down.yml" --workflow-file "$work_dir/build-down.yml" >/dev/null
+	sed -n '/BEGIN upstream_ref options/,/END upstream_ref options/p' "$work_dir/form-down.yml" |
+	sed -n 's/^        - //p' | paste -sd, -)" == \
+	"fanchmwrt-25.12.6,v25.12.6,v25.12.5,v25.12.4" ]]; then
+	pass "a repairing release withdraws the older maintenance branches"
+else
+	fail_case "a repairing release withdraws the older maintenance branches"
+fi
+
+if [[ "$(sed -n '/BEGIN upstream_ref default/,/END upstream_ref default/p' "$work_dir/build-down.yml" |
+	sed -n 's/^        default: //p')" == "fanchmwrt-25.12.6" ]]; then
+	pass "the repaired branch stays the default"
+else
+	fail_case "the repaired branch stays the default"
+fi
+
+# The newest version can withdraw its own branch. The dispatch default then has
+# to fall back to the tag, because the Issue Form can only preselect index 0 and
+# the renderer rejects a default that is not the first choice.
+cp "$issue_form" "$work_dir/form-silent.yml"
+cp "$workflow_file" "$work_dir/build-silent.yml"
+cat > "$work_dir/manifest-silent.json" <<'JSON'
+{"schema_version": 1, "maintenance": {"v25.12.6": "silent"}}
+JSON
+
+if [[ "$(GITHUB_OUTPUT=/dev/null python3 "$renderer" \
+	--tags "$work_dir/tags.json" --branches "$work_dir/branches.json" \
+	--downgrade "$work_dir/manifest-silent.json" \
+	--issue-form "$work_dir/form-silent.yml" --workflow-file "$work_dir/build-silent.yml" >/dev/null
+	sed -n '/BEGIN upstream_ref options/,/END upstream_ref options/p' "$work_dir/form-silent.yml" |
+	sed -n 's/^        - //p' | paste -sd, -)" == \
+	"v25.12.6,v25.12.5,fanchmwrt-25.12.4,v25.12.4" ]]; then
+	pass "a withdrawn newest branch drops out of the choices"
+else
+	fail_case "a withdrawn newest branch drops out of the choices"
+fi
+
+if [[ "$(sed -n '/BEGIN upstream_ref default/,/END upstream_ref default/p' "$work_dir/build-silent.yml" |
+	sed -n 's/^        default: //p')" == "v25.12.6" ]]; then
+	pass "the default falls back to the tag when its branch is withdrawn"
+else
+	fail_case "the default falls back to the tag when its branch is withdrawn"
+fi
+
+# A manifest the builder cannot read must never break the sync.
+cp "$issue_form" "$work_dir/form-nomani.yml"
+cp "$workflow_file" "$work_dir/build-nomani.yml"
+if [[ "$(GITHUB_OUTPUT=/dev/null python3 "$renderer" \
+	--tags "$work_dir/tags.json" --branches "$work_dir/branches.json" \
+	--downgrade "$work_dir/absent.json" \
+	--issue-form "$work_dir/form-nomani.yml" --workflow-file "$work_dir/build-nomani.yml" >/dev/null
+	sed -n '/BEGIN upstream_ref options/,/END upstream_ref options/p' "$work_dir/form-nomani.yml" |
+	sed -n 's/^        - //p' | paste -sd, -)" == \
+	"fanchmwrt-25.12.6,v25.12.6,v25.12.5,fanchmwrt-25.12.4,v25.12.4" ]]; then
+	pass "a missing upstream manifest keeps every maintenance branch"
+else
+	fail_case "a missing upstream manifest keeps every maintenance branch"
+fi
+
 if [[ "$(grep -c '^      default: 0$' "$work_dir/form.yml")" == "1" ]]; then
 	pass "dropdown keeps index 0 as the default selection"
 else

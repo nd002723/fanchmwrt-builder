@@ -51,14 +51,66 @@ jobs:
             core.info(`Fetched ${names.length} tags and ${branchNames.length} branches from ${process.env.UPSTREAM_REPOSITORY}`);
             core.setOutput('count', names.length);
 
+      # Upstream owns the decision about its own maintenance layer. When a
+      # release announces that a later version repairs `fanchmwrt-<version>`,
+      # that branch must stop being offered here; reading it from the manifest
+      # keeps this repository from having to encode the rule a second time.
+      - name: Read the upstream baseline manifest
+        id: baseline
+        uses: actions/github-script@v8
+        env:
+          UPSTREAM_REPOSITORY: fanchmwrt/fanchmwrt
+          MANIFEST_FILE: .github/upstream-manifest.json
+        with:
+          script: |
+            const [owner, repo] = process.env.UPSTREAM_REPOSITORY.split('/');
+            const lines = [];
+            try {
+              const response = await github.rest.repos.getContent({
+                owner, repo, path: 'manifest.json'
+              });
+              const parsed = JSON.parse(
+                Buffer.from(response.data.content || '', response.data.encoding || 'base64').toString('utf8')
+              );
+              const downgrades = parsed.maintenance_downgrades;
+              if (Array.isArray(downgrades)) {
+                for (const entry of downgrades) {
+                  if (!entry || typeof entry.version !== 'string') continue;
+                  const behaviour = typeof entry.behaviour === 'string' ? entry.behaviour : 'maintenance';
+                  lines.push(`${entry.version}\t${behaviour}`);
+                }
+              }
+              core.info(`Upstream manifest lists ${lines.length} downgrade entr${lines.length === 1 ? 'y' : 'ies'}`);
+            } catch (error) {
+              // 404 is the normal state: upstream ships no manifest yet, so every
+              // maintenance branch keeps the behaviour it has today.
+              if (error.status !== 404) throw error;
+              core.notice('Upstream publishes no manifest.json; keeping every maintenance branch.');
+            }
+            // Keep the yaml a valid JSON object: the backport refresh reads it
+            // through scripts/upstream-behaviour.py and treats a missing file as
+            // "every branch behaves normally", so an empty table is the safe
+            // fallback rather than an empty file.
+            const maintenance = {};
+            for (const line of lines) {
+              const [version, behaviour] = line.split('\t');
+              maintenance[version] = behaviour;
+            }
+            require('node:fs').writeFileSync(
+              process.env.MANIFEST_FILE,
+              `${JSON.stringify({ schema_version: 1, maintenance }, null, 2)}\n`
+            );
+
       - name: Render Issue Form choices
         id: render
-        run: >-
-          python3 scripts/render-upstream-refs.py
-          --tags "${{ runner.temp }}/upstream-tags.json"
-          --branches "${{ runner.temp }}/upstream-branches.json"
-          --issue-form .github/ISSUE_TEMPLATE/firmware-build.yml
-          --workflow-file .github/workflows/build.yml
+        run: |
+          set -euo pipefail
+          python3 scripts/render-upstream-refs.py \
+            --tags "${{ runner.temp }}/upstream-tags.json" \
+            --branches "${{ runner.temp }}/upstream-branches.json" \
+            --downgrade .github/upstream-manifest.json \
+            --issue-form .github/ISSUE_TEMPLATE/firmware-build.yml \
+            --workflow-file .github/workflows/build.yml
 
       - name: Checkout newest upstream release
         uses: actions/checkout@v5
@@ -102,6 +154,7 @@ jobs:
         id: backports
         env:
           BACKPORT_PATCHES: ${{ runner.temp }}/devices-backports.tsv
+          LATEST_TAG: ${{ steps.render.outputs.latest }}
         run: |
           set -euo pipefail
           if [[ ! -f backport-source/manifest.json ]]; then
@@ -110,6 +163,12 @@ jobs:
             exit 0
           fi
 
+          upstream_behaviour="$(python3 scripts/upstream-behaviour.py "$LATEST_TAG")"
+          if [[ "$upstream_behaviour" == "silent" ]]; then
+            echo "::warning::Upstream manifest withdraws the maintenance layer for $LATEST_TAG; keeping docs/device-backports.tsv"
+            echo "applied=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           base_commit="$(python3 -c "import json; print(json.load(open('backport-source/manifest.json'))['fanchmwrt']['base_commit'])")"
           patch_count="$(python3 -c "import json; print(json.load(open('backport-source/manifest.json'))['patch_count'])")"
           source_commit="$(git -C upstream-source rev-parse HEAD)"
@@ -169,7 +228,8 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add .github/ISSUE_TEMPLATE/firmware-build.yml .github/workflows/build.yml docs/
+          git add .github/ISSUE_TEMPLATE/firmware-build.yml .github/workflows/build.yml \
+            .github/upstream-manifest.json docs/
           if git diff --cached --quiet; then
             echo "changed=0" >> "$GITHUB_OUTPUT"
             exit 0

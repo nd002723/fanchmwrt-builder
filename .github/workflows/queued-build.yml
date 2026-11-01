@@ -29,6 +29,13 @@ jobs:
       subtarget: ${{ steps.request.outputs.subtarget }}
       profile: ${{ steps.request.outputs.profile }}
       requester: ${{ steps.issue.outputs.requester }}
+      # Job outputs are only rendered for a successful job, so the two outcomes
+      # below are what the report job has to read instead: they say whether the
+      # request was refused by the parser or by the profile check, and which
+      # labels the issue carried when this run started.
+      parse_outcome: ${{ steps.request.outcome }}
+      target_result: ${{ steps.target.outcome }}
+      carried_labels: ${{ steps.issue.outputs.carriedLabels }}
     steps:
       - name: Checkout builder
         uses: actions/checkout@v5
@@ -53,15 +60,38 @@ jobs:
             const labels = response.data.labels.map(label =>
               typeof label === 'string' ? label : label.name
             );
-            if (response.data.state !== 'open' ||
-                !labels.includes('build-firmware') ||
-                !labels.includes('build-dispatching')) {
-              core.setFailed('Issue is not an active dispatched firmware request');
-              return;
-            }
             core.setOutput('title', response.data.title || '');
             core.setOutput('body', response.data.body || '');
             core.setOutput('requester', response.data.user.login);
+            core.setOutput('carriedLabels', labels.join(','));
+            if (response.data.state !== 'open' || !labels.includes('build-firmware')) {
+              core.setFailed('Issue is not an open firmware build request');
+              return;
+            }
+
+            // `build-dispatching` is the queue controller's reservation. Only the
+            // controller sets it, and promotion removes it before dispatching, so
+            // the label is back on the issue only when the controller's reservation
+            // comment and this run belong together. An owner labelling the issue
+            // by hand never produces that combination, which keeps the two intake
+            // paths apart without guessing from the sender.
+            if (!labels.includes('build-dispatching')) {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                per_page: 100
+              });
+              const reserved = comments.some(comment =>
+                comment.user?.login === 'github-actions[bot]' &&
+                /<!-- fanchmwrt-queue-dispatch at=[^ ]+ -->/.test(comment.body || '')
+              );
+              if (!reserved) {
+                core.setFailed('Issue is not an active dispatched firmware request');
+                return;
+              }
+              core.notice('Revalidating a dispatched request whose reservation label was removed.');
+            }
 
       - name: Parse build request
         id: request
@@ -94,6 +124,7 @@ jobs:
           fetch-depth: 1
 
       - name: Resolve FanchmWrt device profile
+        id: target
         env:
           TARGET: ${{ steps.request.outputs.target }}
           SUBTARGET: ${{ steps.request.outputs.subtarget }}
@@ -125,8 +156,8 @@ jobs:
             const currentLabels = current.data.labels.map(label =>
               typeof label === 'string' ? label : label.name
             );
-            if (current.data.state !== 'open' || !currentLabels.includes('build-dispatching')) {
-              core.setFailed('Queue reservation was removed before build approval');
+            if (current.data.state !== 'open' || !currentLabels.includes('build-firmware')) {
+              core.setFailed('Issue is no longer an open firmware build request');
               return;
             }
             async function removeLabel(name) {
@@ -143,6 +174,8 @@ jobs:
             }
             await removeLabel('build-queued');
             await removeLabel('needs-owner-review');
+            await removeLabel('build-review-pending');
+            await removeLabel('build-attention');
             await github.rest.issues.addLabels({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -168,7 +201,11 @@ jobs:
               issue_number: issueNumber,
               body
             });
+            // Drop the reservation last: the label plus the dispatch comment are
+            // what a concurrent run uses to prove it belongs to this dispatch, so
+            // removing it first would let a late duplicate fail the revalidation.
             await removeLabel('build-dispatching');
+            await removeLabel('build-attention');
 
   build:
     name: Build promoted queued firmware
@@ -194,6 +231,9 @@ jobs:
         env:
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           PARSE_RESULT: ${{ needs.parse.result }}
+          PARSE_OUTCOME: ${{ needs.parse.outputs.parse_outcome }}
+          PARSE_TARGET_RESULT: ${{ needs.parse.outputs.target_result }}
+          CARRIED_LABELS: ${{ needs.parse.outputs.carried_labels }}
           BUILD_RESULT: ${{ needs.build.result }}
           UPSTREAM_COMMIT: ${{ needs.build.outputs.upstream_commit }}
           ARCHITECTURE: ${{ needs.parse.outputs.architecture }}
@@ -220,9 +260,42 @@ jobs:
                 if (error.status !== 404) throw error;
               }
             }
+            // Colours and descriptions are not repeated here: the shared table in
+            // scripts/lib/labels.js owns them, so a colour changed for one workflow
+            // cannot leave a stale one behind in another.
+            const { ensureLabel } = require('./scripts/lib/labels.js');
+            function labelSet(raw) {
+              return new Set((raw || '').split(',').map(item => item.trim()).filter(Boolean));
+            }
 
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            if (process.env.PARSE_RESULT !== 'success') {
+            const parseSucceeded = process.env.PARSE_RESULT === 'success';
+
+            // Give a failed request back to the owner and decide whether that is
+            // already true. The controller may have moved the issue on while this
+            // run was failing -- most often because the slot reservation went stale
+            // and was re-queued -- so the current labels, not the ones this run
+            // started with, decide whether the hand-over comment still applies.
+            async function dispatchNeedsOwnerReview(reason) {
+              await removeLabel('build-dispatching');
+              await removeLabel('build-queued');
+              await removeLabel('approved-build');
+              await ensureLabel(github, context, 'needs-owner-review');
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                labels: ['needs-owner-review']
+              });
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: [
+                  `<!-- fanchmwrt-build refused reason=${reason} run=${context.runId} -->`,
+                  '队列申请重新校验失败，已转为仓库所有者审核。'
+                ].join('\n')
+              });
               const current = await github.rest.issues.get({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -231,77 +304,15 @@ jobs:
               const labels = current.data.labels.map(label =>
                 typeof label === 'string' ? label : label.name
               );
-              const ownerTookOver = labels.includes('approved-build') &&
-                !labels.includes('build-dispatching');
-              if (!ownerTookOver) {
-                await removeLabel('build-dispatching');
-                await removeLabel('build-queued');
-                await removeLabel('approved-build');
-                await github.rest.issues.addLabels({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issueNumber,
-                  labels: ['needs-owner-review']
-                });
-              }
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issueNumber,
-                body: ownerTookOver
-                  ? `队列派发已停止，此申请已经由仓库所有者接管。\n\n[查看 Actions 运行](${runUrl})`
-                  : `队列申请重新校验失败，已转为仓库所有者审核。\n\n[查看 Actions 运行](${runUrl})`
-              });
-            } else {
-              let summary;
-              let marker = '';
-              if (process.env.BUILD_RESULT === 'success') {
-                summary = '队列中的固件构建成功，产物可从本次 Actions 运行中下载。';
-                const identity = [
-                  process.env.UPSTREAM_COMMIT,
-                  process.env.ARCHITECTURE,
-                  process.env.TARGET,
-                  process.env.SUBTARGET,
-                  process.env.PROFILE
-                ].join('\n');
-                const fingerprint = crypto.createHash('sha256').update(identity).digest('hex');
-                marker = `<!-- fanchmwrt-build fingerprint=${fingerprint} -->\n`;
-              } else if (process.env.BUILD_RESULT === 'cancelled') {
-                marker = `<!-- fanchmwrt-auto-slot-released run=${context.runId} -->\n`;
-                summary = '队列中的固件构建已取消，自动构建额度已经释放。';
-              } else {
-                marker = `<!-- fanchmwrt-auto-slot-released run=${context.runId} -->\n`;
-                summary = '队列中的固件构建失败，自动构建额度已经释放。';
-              }
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issueNumber,
-                body: `${marker}${summary}\n\n[查看 Actions 运行](${runUrl})`
-              });
-              // Keep the issue OPEN on failure and cancellation: the owner has to
-              // review a failed queued build by hand, so closing it would erase
-              // the place where that review happens. The slot-release marker is
-              // therefore not read back from `approved-build` alone -- the owner
-              // removes that label before retrying -- but from every label state
-              // this workflow can leave the issue in. See queue-controller.yml.
-              if (process.env.BUILD_RESULT === 'success') {
-                await github.rest.issues.update({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issueNumber,
-                  state: 'closed',
-                  state_reason: 'completed'
-                });
-              }
+              return !labels.includes('needs-owner-review') ||
+                labels.includes('build-queued') ||
+                labels.includes('build-dispatching') ||
+                labels.includes('approved-build');
             }
 
-            // A successful build leaves nothing for the controller to refund, and
-            // every dispatch it receives is itself an approval-comment-bearing
-            // run -- the controller counts those runs per requester. Dispatching
-            // here on success would therefore inflate that count and could push
-            // the same requester over the per-user limit for their next request.
-            if (process.env.PARSE_RESULT === 'success' && process.env.BUILD_RESULT !== 'success') {
+            // Wake the controller so a refunded slot is spent now instead of at the
+            // next scheduled reconciliation.
+            async function dispatchQueueController() {
               try {
                 const repository = await github.rest.repos.get({
                   owner: context.repo.owner,
@@ -316,4 +327,92 @@ jobs:
               } catch (error) {
                 core.warning(`Queue controller dispatch failed; scheduled reconciliation will retry: ${error.message}`);
               }
+            }
+
+            if (!parseSucceeded) {
+              // Two different things end up here. A dispatched request that fails
+              // revalidation goes back to the owner. A request the owner approved
+              // by hand was never queued at all, so its labels and its issue are
+              // none of this workflow's business -- touching them would strip an
+              // approval that issue-build.yml is using right now.
+              const dispatched = labelSet(process.env.CARRIED_LABELS).has('build-dispatching');
+              let ownerTookOver = !dispatched;
+              if (dispatched) {
+                const reason = process.env.PARSE_TARGET_RESULT === 'failure'
+                  ? 'queue_target'
+                  : 'queue_parse';
+                ownerTookOver = await dispatchNeedsOwnerReview(reason);
+              }
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: ownerTookOver
+                  ? `队列派发已停止，此申请已经由仓库所有者接管。\n\n[查看 Actions 运行](${runUrl})`
+                  : `队列申请重新校验失败，已转为仓库所有者审核（详见上一条评论）。\n\n[查看 Actions 运行](${runUrl})`
+              });
+              return;
+            }
+
+            let summary;
+            let marker = '';
+            if (process.env.BUILD_RESULT === 'success') {
+              summary = '队列中的固件构建成功，产物可从本次 Actions 运行中下载。';
+              const identity = [
+                process.env.UPSTREAM_COMMIT,
+                process.env.ARCHITECTURE,
+                process.env.TARGET,
+                process.env.SUBTARGET,
+                process.env.PROFILE
+              ].join('\n');
+              const fingerprint = crypto.createHash('sha256').update(identity).digest('hex');
+              marker = `<!-- fanchmwrt-build fingerprint=${fingerprint} -->\n`;
+              await removeLabel('build-attention');
+            } else if (process.env.BUILD_RESULT === 'cancelled') {
+              marker = `<!-- fanchmwrt-auto-slot-released run=${context.runId} -->\n`;
+              summary = '队列中的固件构建已取消，自动构建额度已经释放，申请已标记为待审。';
+              await ensureLabel(github, context, 'build-attention');
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                labels: ['build-attention']
+              });
+            } else {
+              marker = `<!-- fanchmwrt-auto-slot-released run=${context.runId} -->\n`;
+              summary = '队列中的固件构建失败，自动构建额度已经释放，申请已标记为待审。';
+              await ensureLabel(github, context, 'build-attention');
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                labels: ['build-attention']
+              });
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: `${marker}${summary}\n\n[查看 Actions 运行](${runUrl})`
+            });
+            // A failed or cancelled build leaves the issue open on purpose: the
+            // owner has to review it, and closing it would erase the place where
+            // that review happens.
+            if (process.env.BUILD_RESULT === 'success') {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                state: 'closed',
+                state_reason: 'completed'
+              });
+            }
+
+            // A successful build leaves nothing for the controller to refund, and
+            // every dispatch it receives is itself an approval-comment-bearing
+            // run -- the controller counts those runs per requester. Dispatching
+            // here on success would therefore inflate that count and could push
+            // the same requester over the per-user limit for their next request.
+            if (process.env.BUILD_RESULT !== 'success') {
+              await dispatchQueueController();
             }

@@ -22,6 +22,11 @@ jobs:
       - name: Checkout builder
         uses: actions/checkout@v5
 
+      # PyYAML is not part of the runner image contract; the form test parses
+      # the rendered YAML to prove the choice block stays valid.
+      - name: Install test dependencies
+        run: python3 -m pip install --disable-pip-version-check --quiet pyyaml
+
       # Keeps the Issue Form, the workflow_dispatch inputs and the renderer in
       # agreement. Until now this suite only ran by hand.
       - name: Test build request form and ref renderer
@@ -31,6 +36,17 @@ jobs:
       # automatic review performs; this suite locks the re-implemented rules.
       - name: Test duplicate build guard
         run: node ./scripts/test-duplicate-build-guard.js
+
+      # Device resolution is upstream first, then the optional backport set, then
+      # a plain "unknown device". The order and the exit codes matter: a device
+      # nobody provides must not be reported as a build failure.
+      - name: Test device resolution chain
+        run: bash ./scripts/test-device-resolution.sh
+
+      # Labels are applied by four workflows; the shared table keeps their
+      # colours and descriptions from drifting apart.
+      - name: Test shared label definitions
+        run: node ./scripts/test-labels.js
 
       - name: Test extroot overlay selection
         run: |

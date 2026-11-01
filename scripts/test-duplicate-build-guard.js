@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
- * Offline rehearsal of the "Check for an existing successful build" step in
- * .github/workflows/issue-build.yml.
+ * Regression suite for scripts/lib/duplicate-build-guard.js.
  *
- * The real step runs inside actions/github-script.  This harness re-implements
- * the same decision path against recorded REST payloads, so a regression in the
- * fingerprint or artifact rules is caught without spending a real build slot.
+ * The module is the real decision core used by auto-review-build.yml and
+ * issue-build.yml; this file only supplies recorded REST payloads for it, so a
+ * change to the workflow's rules has to change the module and will show up
+ * here. The slot-accounting cases at the end keep the controller's regexes in
+ * step with the comment shapes the workflows post.
  *
  * Usage: node scripts/test-duplicate-build-guard.js
  */
@@ -13,79 +14,12 @@
 'use strict';
 
 const assert = require('assert');
-const crypto = require('crypto');
-
-function identity(commit, architecture, target, subtarget, profile) {
-  return [commit, architecture, target, subtarget, profile].join('\n');
-}
-
-function fingerprintOf(fields) {
-  return crypto.createHash('sha256').update(identity(...fields)).digest('hex');
-}
-
-const FINGERPRINT_PATTERN = /<!-- fanchmwrt-build fingerprint=([a-f0-9]{64}) -->/;
-const RUN_PATTERN = /\/actions\/runs\/(\d+)/;
-
-/**
- * Mirror of the force-build bypass.  The workflow must consult the live label
- * list; `github.event.issue.labels` on an `issues: labeled` event is a snapshot
- * from before the label was applied and never contains the new label.
- */
-function shouldRunGuard(liveLabels) {
-  return !liveLabels.includes('force-build');
-}
-
-/**
- * Mirror of the workflow step.  `world` carries everything the REST calls would
- * have returned, so the decision is pure and reproducible.
- */
-function findDuplicate({ current, candidate, world, reuseCutoff }) {
-  const fingerprint = fingerprintOf(current);
-  const comments = [];
-  for (const [number, issue] of world.issues) {
-    if (number === candidate.issueNumber) continue;
-    if (issue.updated_at < reuseCutoff) continue;
-    for (const comment of issue.comments) {
-      if (comment.user !== 'github-actions[bot]') continue;
-      if (comment.created_at < reuseCutoff) continue;
-      comments.push({ ...comment, issue_number: number });
-    }
-  }
-
-  const fingerprintedRuns = new Set();
-  for (const comment of comments) {
-    const runMatch = comment.body.match(RUN_PATTERN);
-    if (runMatch && FINGERPRINT_PATTERN.test(comment.body)) {
-      fingerprintedRuns.add(runMatch[1]);
-    }
-  }
-
-  const legacyLines = [
-    `- 上游版本：\`${current[5]}\``,
-    `- 架构：\`${current[1]}\``,
-    `- 目标：\`${current[2]}/${current[3]}/${current[4]}\``
-  ];
-
-  const matches = [];
-  for (const comment of comments) {
-    const runMatch = comment.body.match(RUN_PATTERN);
-    if (!runMatch) continue;
-    const marker = comment.body.match(FINGERPRINT_PATTERN);
-    const exact = marker && marker[1] === fingerprint;
-    const legacy = !marker &&
-      !fingerprintedRuns.has(runMatch[1]) &&
-      legacyLines.every(line => comment.body.includes(line));
-    if (exact || legacy) matches.push({ runId: runMatch[1], issue: comment.issue_number });
-  }
-
-  for (const match of matches) {
-    const run = world.runs.get(match.runId);
-    if (!run || run.conclusion !== 'success') continue;
-    if (!world.artifacts.get(match.runId)?.some(a => !a.expired)) continue;
-    return match;
-  }
-  return null;
-}
+const {
+  findDuplicate,
+  fingerprintOf,
+  reuseCutoff,
+  shouldRunGuard,
+} = require('./lib/duplicate-build-guard.js');
 
 const NOW = Date.parse('2026-11-01T12:00:00Z');
 const CUTOFF = new Date(NOW - 30 * 24 * 60 * 60 * 1000).toISOString();
@@ -120,7 +54,8 @@ test('rejects a repeat of a successful fingerprinted build (#9 vs #22)', () => {
     current: x86,
     candidate: { issueNumber: 9 },
     world,
-    reuseCutoff: CUTOFF
+    cutoff: CUTOFF,
+    upstreamRef: x86[5]
   });
   assert.ok(hit, 'expected the earlier x86 build to be reused');
   assert.strictEqual(hit.runId, '41291164081');
@@ -141,7 +76,7 @@ test('allows the build when the earlier artifact has expired', () => {
     artifacts: new Map([['41291164081', [{ expired: true }]]])
   };
   assert.strictEqual(
-    findDuplicate({ current: x86, candidate: { issueNumber: 9 }, world, reuseCutoff: CUTOFF }),
+    findDuplicate({ current: x86, candidate: { issueNumber: 9 }, world, cutoff: CUTOFF, upstreamRef: x86[5] }),
     null
   );
 });
@@ -161,7 +96,7 @@ test('allows the build when the earlier run failed', () => {
     artifacts: new Map([['41291164081', [{ expired: false }]]])
   };
   assert.strictEqual(
-    findDuplicate({ current: x86, candidate: { issueNumber: 9 }, world, reuseCutoff: CUTOFF }),
+    findDuplicate({ current: x86, candidate: { issueNumber: 9 }, world, cutoff: CUTOFF, upstreamRef: x86[5] }),
     null
   );
 });
@@ -181,7 +116,7 @@ test('does not reuse a build of a different target', () => {
     artifacts: new Map([['41291164081', [{ expired: false }]]])
   };
   assert.strictEqual(
-    findDuplicate({ current: e20c, candidate: { issueNumber: 17 }, world, reuseCutoff: CUTOFF }),
+    findDuplicate({ current: e20c, candidate: { issueNumber: 17 }, world, cutoff: CUTOFF, upstreamRef: e20c[5] }),
     null
   );
 });
@@ -201,7 +136,7 @@ test('ignores builds older than the reuse window', () => {
     artifacts: new Map([['38000000000', [{ expired: false }]]])
   };
   assert.strictEqual(
-    findDuplicate({ current: x86, candidate: { issueNumber: 9 }, world, reuseCutoff: CUTOFF }),
+    findDuplicate({ current: x86, candidate: { issueNumber: 9 }, world, cutoff: CUTOFF, upstreamRef: x86[5] }),
     null
   );
 });
@@ -221,7 +156,7 @@ test('never treats its own issue as a duplicate source', () => {
     artifacts: new Map([['41291164081', [{ expired: false }]]])
   };
   assert.strictEqual(
-    findDuplicate({ current: x86, candidate: { issueNumber: 9 }, world, reuseCutoff: CUTOFF }),
+    findDuplicate({ current: x86, candidate: { issueNumber: 9 }, world, cutoff: CUTOFF, upstreamRef: x86[5] }),
     null
   );
 });
@@ -247,7 +182,8 @@ test('still honours legacy comments without a fingerprint marker', () => {
     current: x86,
     candidate: { issueNumber: 9 },
     world,
-    reuseCutoff: CUTOFF
+    cutoff: CUTOFF,
+    upstreamRef: x86[5]
   });
   assert.ok(hit, 'legacy comment should still be reused');
   assert.strictEqual(hit.runId, '37000000000');
@@ -279,7 +215,7 @@ test('force-build bypasses the check, read from live labels not the event snapsh
     'the event snapshot lacks force-build, so the guard would run and compile again'
   );
   assert.strictEqual(
-    findDuplicate({ current: e20c, candidate: { issueNumber: 17 }, world, reuseCutoff: CUTOFF }) !== null,
+    findDuplicate({ current: e20c, candidate: { issueNumber: 17 }, world, cutoff: CUTOFF, upstreamRef: e20c[5] }) !== null,
     true,
     'without force-build the earlier build must be reused'
   );
@@ -287,6 +223,60 @@ test('force-build bypasses the check, read from live labels not the event snapsh
     shouldRunGuard(liveLabels),
     false,
     'force-build read from live labels must bypass the guard'
+  );
+});
+
+test('skips a run the retention policy already deleted', () => {
+  // The bot comment outlives the run it links; a 404 from the runs API must be
+  // "not this one", not a crash that fails the whole request.
+  const world = {
+    issues: new Map([[22, {
+      updated_at: FRESH,
+      comments: [{
+        user: 'github-actions[bot]',
+        created_at: FRESH,
+        body: `<!-- fanchmwrt-build fingerprint=${fingerprintOf(x86)} -->\n` +
+          '[查看 Actions 运行](https://github.com/o/r/actions/runs/41291164081)'
+      }, {
+        user: 'github-actions[bot]',
+        created_at: '2026-11-01T11:00:00Z',
+        body: `<!-- fanchmwrt-build fingerprint=${fingerprintOf(x86)} -->\n` +
+          '[查看 Actions 运行](https://github.com/o/r/actions/runs/41291164099)'
+      }]
+    }]]),
+    runs: new Map([
+      ['41291164081', { missing: true }],
+      ['41291164099', { conclusion: 'success' }]
+    ]),
+    artifacts: new Map([['41291164099', [{ expired: false }]]])
+  };
+  const hit = findDuplicate({ current: x86, candidate: { issueNumber: 9 }, world, cutoff: CUTOFF, upstreamRef: x86[5] });
+  assert.ok(hit, 'the surviving run must still be found');
+  assert.strictEqual(hit.runId, '41291164099');
+});
+
+test('rejects a legacy comment that names a different upstream ref', () => {
+  // The fingerprint covers the commit but not the ref, so a legacy footer is
+  // compared against the requested ref as well.
+  const world = {
+    issues: new Map([[3, {
+      updated_at: FRESH,
+      comments: [{
+        user: 'github-actions[bot]',
+        created_at: FRESH,
+        body: '固件构建成功。\n\n' +
+          '- 上游版本：`v25.12.5`\n' +
+          `- 架构：\`${x86[1]}\`\n` +
+          `- 目标：\`${x86[2]}/${x86[3]}/${x86[4]}\`\n` +
+          '[查看 Actions 运行](https://github.com/o/r/actions/runs/37000000000)'
+      }]
+    }]]),
+    runs: new Map([['37000000000', { conclusion: 'success' }]]),
+    artifacts: new Map([['37000000000', [{ expired: false }]]])
+  };
+  assert.strictEqual(
+    findDuplicate({ current: x86, candidate: { issueNumber: 9 }, world, cutoff: CUTOFF, upstreamRef: x86[5] }),
+    null
   );
 });
 

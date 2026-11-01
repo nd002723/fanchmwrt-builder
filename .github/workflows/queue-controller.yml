@@ -31,28 +31,10 @@ jobs:
               return Number.isInteger(parsed) && parsed > 0 && parsed <= 50 ? parsed : fallback;
             }
 
-            async function ensureLabel(name, color, description) {
-              try {
-                await github.rest.issues.getLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  name
-                });
-              } catch (error) {
-                if (error.status !== 404) throw error;
-                try {
-                  await github.rest.issues.createLabel({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    name,
-                    color,
-                    description
-                  });
-                } catch (createError) {
-                  if (createError.status !== 422) throw createError;
-                }
-              }
-            }
+            // Label names, colours and descriptions live in
+            // scripts/lib/labels.js so the four workflows that touch them cannot
+            // drift apart.
+            const { ensureAllLabels } = require('./scripts/lib/labels.js');
 
             async function removeLabel(issueNumber, name) {
               try {
@@ -85,10 +67,13 @@ jobs:
             // register that stale run id as this run's approval.
             const runPattern = /\[查看 (?:本次 )?Actions 运行\]\(\S*?\/actions\/runs\/(\d+)\)/;
 
-            await ensureLabel('build-queued', 'd4c5f9', 'Waiting for an automatic build slot');
-            await ensureLabel('build-dispatching', 'fbca04', 'Reserved automatic build slot');
-            await ensureLabel('build-review-pending', 'c5def5', 'Validated request waiting for queue review');
-            await ensureLabel('needs-owner-review', 'b60205', 'Requires repository owner approval');
+            // Every label the pipeline can apply, created once per run. The
+            // yellow `build-attention` label is among them: a failed or cancelled
+            // build is the one state a maintainer has to look at by hand.
+            const createdLabels = await ensureAllLabels(github, context);
+            if (createdLabels.length) {
+              console.log(`Created labels: ${createdLabels.join(', ')}`);
+            }
 
             // Only runs announced on an `approved-build` issue count against the
             // daily slots. A manual `workflow_dispatch` run of build.yml has no
@@ -143,14 +128,17 @@ jobs:
               since: todayStart,
               per_page: 100
             });
-            const releaseIssueNumbers = new Set(
-              approvedIssues.filter(item => !item.pull_request).map(item => item.number)
+            // `releaseSources` is the union of both lists: an issue that still
+            // carries `approved-build` is exactly where the marker is written --
+            // a failed queued build keeps that label on purpose -- so skipping it
+            // made the refund unreachable and stranded the daily slot.
+            const issueNumbers = new Set(
+              [...approvedIssues, ...releaseSources]
+                .filter(item => !item.pull_request)
+                .map(item => item.number)
             );
-            for (const issue of releaseSources) {
-              if (issue.pull_request) continue;
-              if (releaseIssueNumbers.has(issue.number)) continue;
-              releaseIssueNumbers.add(issue.number);
-              const comments = await commentsSinceToday(issue.number);
+            for (const issueNumber of issueNumbers) {
+              const comments = await commentsSinceToday(issueNumber);
               for (const comment of comments) {
                 if (comment.user?.login !== 'github-actions[bot]') continue;
                 const release = (comment.body || '').match(releasePattern);
@@ -334,6 +322,9 @@ jobs:
             for (const issue of selected) {
               await removeLabel(issue.number, 'build-queued');
               await removeLabel(issue.number, 'needs-owner-review');
+              // Retrying replaces the failed attempt; the operator has acted, so
+              // the yellow marker has done its job.
+              await removeLabel(issue.number, 'build-attention');
               await github.rest.issues.addLabels({
                 owner: context.repo.owner,
                 repo: context.repo.repo,

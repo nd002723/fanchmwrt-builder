@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "generated_by": ".github/workflows/sync-upstream-refs.yml",
+  "source": "https://github.com/fanchmwrt/fanchmwrt/blob/main/manifest.json",
+  "maintenance": {}
+}
