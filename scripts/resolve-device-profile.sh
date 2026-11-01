@@ -7,7 +7,7 @@ subtarget="${3:-}"
 profile="${4:-}"
 architecture="${5:-}"
 backport_source="${6:-${DEVICE_BACKPORT_REPOSITORY:-nd002723/fanchmwrt-device-backports}}"
-backport_ref="${7:-${DEVICE_BACKPORT_REF:-main}}"
+backport_ref="${7:-${DEVICE_BACKPORT_REF:-}}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 validator="$script_dir/validate-openwrt-target.sh"
 
@@ -42,7 +42,8 @@ else
 		echo "Invalid device backport repository: $backport_source" >&2
 		exit 2
 	fi
-	if [[ ! "$backport_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+	if [[ -n "$backport_ref" ]] &&
+		[[ ! "$backport_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
 		echo "Invalid device backport ref: $backport_ref" >&2
 		exit 2
 	fi
@@ -53,11 +54,37 @@ else
 	git -C "$backport_dir" init -q
 	git -C "$backport_dir" remote add origin \
 		"https://github.com/${backport_source}.git"
+
+	default_backport_ref() {
+		GIT_TERMINAL_PROMPT=0 git -C "$backport_dir" ls-remote --symref origin HEAD 2>/dev/null \
+			| awk '/^ref:/ {sub("refs/heads/", "", $2); print $2; exit}'
+	}
+
+	if [[ -z "$backport_ref" ]]; then
+		backport_ref="$(default_backport_ref)"
+		if [[ -z "$backport_ref" ]]; then
+			echo "Cannot resolve the default branch of $backport_source" >&2
+			rm -rf -- "$cleanup_dir"
+			exit 20
+		fi
+	fi
+
 	if ! GIT_TERMINAL_PROMPT=0 git -C "$backport_dir" fetch \
 		--quiet --depth=1 origin "$backport_ref"; then
-		echo "Required device backport repository is unavailable: $backport_source@$backport_ref" >&2
-		rm -rf -- "$cleanup_dir"
-		exit 20
+		fallback_ref="$(default_backport_ref)"
+		if [[ -z "$fallback_ref" || "$fallback_ref" == "$backport_ref" ]]; then
+			echo "Required device backport repository is unavailable: $backport_source@$backport_ref" >&2
+			rm -rf -- "$cleanup_dir"
+			exit 20
+		fi
+		echo "Device backport ref '$backport_ref' is unavailable, falling back to $fallback_ref" >&2
+		backport_ref="$fallback_ref"
+		if ! GIT_TERMINAL_PROMPT=0 git -C "$backport_dir" fetch \
+			--quiet --depth=1 origin "$backport_ref"; then
+			echo "Required device backport repository is unavailable: $backport_source@$backport_ref" >&2
+			rm -rf -- "$cleanup_dir"
+			exit 20
+		fi
 	fi
 	git -C "$backport_dir" checkout --quiet --detach FETCH_HEAD
 fi

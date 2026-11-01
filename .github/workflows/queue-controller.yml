@@ -76,12 +76,33 @@ jobs:
             const approvalPattern = /<!-- fanchmwrt-auto-approved date=(\d{4}-\d{2}-\d{2}) requester=([A-Za-z0-9-]+) -->/;
             const releasePattern = /<!-- fanchmwrt-auto-slot-released run=(\d+) -->/;
             const dispatchPattern = /<!-- fanchmwrt-queue-dispatch at=([^ ]+) -->/;
-            const runPattern = /\/actions\/runs\/(\d+)/;
+            // Only the bot's own footer links a run of THIS repository. The
+            // footer text is written by queued-build.yml and issue-build.yml and
+            // appears verbatim in the pattern below, where the Chinese literal
+            // must stay byte-identical to what the bot posts. A plain
+            // "/actions/runs/(\d+)" also matches the links a review comment
+            // carries to an OLD build (and to an old issue's run), so it would
+            // register that stale run id as this run's approval.
+            const runPattern = /\[查看 (?:本次 )?Actions 运行\]\(\S*?\/actions\/runs\/(\d+)\)/;
 
             await ensureLabel('build-queued', 'd4c5f9', 'Waiting for an automatic build slot');
             await ensureLabel('build-dispatching', 'fbca04', 'Reserved automatic build slot');
             await ensureLabel('build-review-pending', 'c5def5', 'Validated request waiting for queue review');
             await ensureLabel('needs-owner-review', 'b60205', 'Requires repository owner approval');
+
+            // Only runs announced on an `approved-build` issue count against the
+            // daily slots. A manual `workflow_dispatch` run of build.yml has no
+            // issue and no approval marker, so it never enters approvalRuns and
+            // never consumes automatic budget -- that is the intended behaviour.
+            async function commentsSinceToday(issueNumber) {
+              return github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                since: todayStart,
+                per_page: 100
+              });
+            }
 
             const approvedIssues = await github.paginate(github.rest.issues.listForRepo, {
               owner: context.repo.owner,
@@ -94,21 +115,45 @@ jobs:
             const approvalRuns = new Map();
             const releasedRuns = new Set();
             for (const issue of approvedIssues.filter(item => !item.pull_request)) {
-              const comments = await github.paginate(github.rest.issues.listComments, {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issue.number,
-                since: todayStart,
-                per_page: 100
-              });
+              const comments = await commentsSinceToday(issue.number);
               for (const comment of comments) {
                 if (comment.user?.login !== 'github-actions[bot]') continue;
                 const approval = (comment.body || '').match(approvalPattern);
-                const release = (comment.body || '').match(releasePattern);
                 const run = (comment.body || '').match(runPattern);
                 if (approval?.[1] === utcDate && run) {
                   approvalRuns.set(Number(run[1]), approval[2]);
                 }
+              }
+            }
+
+            // Slot releases are collected from every open build request, not only
+            // from the ones still carrying `approved-build`. A failed or cancelled
+            // queued build leaves its issue open on purpose -- the owner has to
+            // review it -- and the retry instruction tells the owner to remove
+            // `approved-build`, which is exactly the label this scan used to
+            // depend on. Filtering by `build-firmware` instead keeps the release
+            // marker reachable in every label state the workflow can produce, so
+            // a run that never settles (for example a null conclusion) can always
+            // be refunded instead of stranding a daily slot forever.
+            const releaseSources = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              labels: 'build-firmware',
+              since: todayStart,
+              per_page: 100
+            });
+            const releaseIssueNumbers = new Set(
+              approvedIssues.filter(item => !item.pull_request).map(item => item.number)
+            );
+            for (const issue of releaseSources) {
+              if (issue.pull_request) continue;
+              if (releaseIssueNumbers.has(issue.number)) continue;
+              releaseIssueNumbers.add(issue.number);
+              const comments = await commentsSinceToday(issue.number);
+              for (const comment of comments) {
+                if (comment.user?.login !== 'github-actions[bot]') continue;
+                const release = (comment.body || '').match(releasePattern);
                 if (release) releasedRuns.add(Number(release[1]));
               }
             }

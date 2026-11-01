@@ -1,4 +1,5 @@
 /source/
 /artifacts/
 *.log
+__pycache__/
 

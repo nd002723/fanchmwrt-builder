@@ -1,0 +1,41 @@
+name: Test builder scripts
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: builder-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scripts:
+    name: Exercise form parsing and duplicate rules
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout builder
+        uses: actions/checkout@v5
+
+      # Keeps the Issue Form, the workflow_dispatch inputs and the renderer in
+      # agreement. Until now this suite only ran by hand.
+      - name: Test build request form and ref renderer
+        run: bash ./scripts/test-build-request-form.sh
+
+      # The approved-build path used to skip every duplicate and reuse check the
+      # automatic review performs; this suite locks the re-implemented rules.
+      - name: Test duplicate build guard
+        run: node ./scripts/test-duplicate-build-guard.js
+
+      - name: Test extroot overlay selection
+        run: |
+          bash ./scripts/test-extroot-overlay-selection.sh \
+            overlay/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade-run \
+            overlay/package/fcm/extroot-sysupgrade/files/extroot-sysupgrade.sh \
+            assets/first-extroot-sysupgrade.sh \
+            overlay/package/fcm/extroot-sysupgrade/files/extroot-device.sh

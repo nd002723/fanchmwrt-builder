@@ -11,11 +11,14 @@ import sys
 TITLE_PREFIX = "[Firmware Build]"
 FIELD_LABELS = {
     "Upstream ref": "upstream_ref",
+    "Upstream ref override": "upstream_ref_override",
     "Architecture": "architecture",
     "Target": "target",
     "Subtarget": "subtarget",
     "Profile": "profile",
 }
+OPTIONAL_FIELDS = frozenset({"upstream_ref_override"})
+REQUIRED_FIELDS = ("upstream_ref", "architecture", "target", "subtarget", "profile")
 COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]*$")
 REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+-]{0,199}$")
 HEADING_RE = re.compile(r"^### ([^\r\n]+)\r?\n(.*?)(?=^### |\Z)", re.MULTILINE | re.DOTALL)
@@ -37,15 +40,25 @@ def parse_fields(body: str) -> dict[str, str]:
             fail(f"duplicate field: {label}")
         value = match.group(2).strip()
         if not value or value == "_No response_":
-            fail(f"missing field: {label}")
+            if key not in OPTIONAL_FIELDS:
+                fail(f"missing field: {label}")
+            continue
         if "\n" in value or "\r" in value:
             fail(f"field must contain one line: {label}")
         values[key] = value
 
-    missing = [label for label, key in FIELD_LABELS.items() if key not in values]
-    if missing:
-        fail("missing fields: " + ", ".join(missing))
+    absent = [field for field in REQUIRED_FIELDS if field not in values]
+    if absent:
+        labels = [label for label, key in FIELD_LABELS.items() if key in absent]
+        fail("missing fields: " + ", ".join(labels))
     return values
+
+
+def validate_ref(ref: str, label: str) -> None:
+    if not REF_RE.fullmatch(ref):
+        fail(f"{label} contains unsupported characters or is too long")
+    if any(part in ref for part in ("..", "//", "@{")) or ref.endswith(("/", ".")):
+        fail(f"{label} is not a valid branch, tag, or commit name")
 
 
 def validate(values: dict[str, str]) -> None:
@@ -56,20 +69,20 @@ def validate(values: dict[str, str]) -> None:
         if not COMPONENT_RE.fullmatch(values[key]):
             fail(f"invalid {key}: {values[key]!r}")
 
-    ref = values["upstream_ref"]
-    if not REF_RE.fullmatch(ref):
-        fail("Upstream ref contains unsupported characters or is too long")
-    if any(part in ref for part in ("..", "//", "@{")) or ref.endswith(("/", ".")):
-        fail("Upstream ref is not a valid branch, tag, or commit name")
+    validate_ref(values["upstream_ref"], "Upstream ref")
+    override = values.get("upstream_ref_override")
+    if override is not None:
+        validate_ref(override, "Upstream ref override")
 
 
 def write_outputs(values: dict[str, str]) -> None:
     output_path = os.environ.get("GITHUB_OUTPUT")
     if not output_path:
         fail("GITHUB_OUTPUT is unavailable")
+    resolved = values.get("upstream_ref_override") or values["upstream_ref"]
     with open(output_path, "a", encoding="utf-8", newline="\n") as output:
-        for key in ("upstream_ref", "architecture", "target", "subtarget", "profile"):
-            output.write(f"{key}={values[key]}\n")
+        for key in REQUIRED_FIELDS:
+            output.write(f"{key}={resolved if key == 'upstream_ref' else values[key]}\n")
 
 
 def main() -> None:

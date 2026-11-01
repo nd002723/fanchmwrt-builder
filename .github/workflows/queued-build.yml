@@ -22,7 +22,8 @@ jobs:
     name: Revalidate queued request
     runs-on: ubuntu-22.04
     outputs:
-      upstream_ref: ${{ steps.upstream.outputs.result }}
+      upstream_ref: ${{ steps.request.outputs.upstream_ref }}
+      upstream_commit: ${{ steps.upstream.outputs.result }}
       architecture: ${{ steps.request.outputs.architecture }}
       target: ${{ steps.request.outputs.target }}
       subtarget: ${{ steps.request.outputs.subtarget }}
@@ -174,7 +175,7 @@ jobs:
     needs: parse
     uses: ./.github/workflows/build.yml
     with:
-      upstream_ref: ${{ needs.parse.outputs.upstream_ref }}
+      upstream_ref: ${{ needs.parse.outputs.upstream_commit }}
       architecture: ${{ needs.parse.outputs.architecture }}
       target: ${{ needs.parse.outputs.target }}
       subtarget: ${{ needs.parse.outputs.subtarget }}
@@ -278,6 +279,12 @@ jobs:
                 issue_number: issueNumber,
                 body: `${marker}${summary}\n\n[查看 Actions 运行](${runUrl})`
               });
+              // Keep the issue OPEN on failure and cancellation: the owner has to
+              // review a failed queued build by hand, so closing it would erase
+              // the place where that review happens. The slot-release marker is
+              // therefore not read back from `approved-build` alone -- the owner
+              // removes that label before retrying -- but from every label state
+              // this workflow can leave the issue in. See queue-controller.yml.
               if (process.env.BUILD_RESULT === 'success') {
                 await github.rest.issues.update({
                   owner: context.repo.owner,
@@ -289,17 +296,24 @@ jobs:
               }
             }
 
-            try {
-              const repository = await github.rest.repos.get({
-                owner: context.repo.owner,
-                repo: context.repo.repo
-              });
-              await github.rest.actions.createWorkflowDispatch({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                workflow_id: 'queue-controller.yml',
-                ref: repository.data.default_branch
-              });
-            } catch (error) {
-              core.warning(`Queue controller dispatch failed; scheduled reconciliation will retry: ${error.message}`);
+            // A successful build leaves nothing for the controller to refund, and
+            // every dispatch it receives is itself an approval-comment-bearing
+            // run -- the controller counts those runs per requester. Dispatching
+            // here on success would therefore inflate that count and could push
+            // the same requester over the per-user limit for their next request.
+            if (process.env.PARSE_RESULT === 'success' && process.env.BUILD_RESULT !== 'success') {
+              try {
+                const repository = await github.rest.repos.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo
+                });
+                await github.rest.actions.createWorkflowDispatch({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  workflow_id: 'queue-controller.yml',
+                  ref: repository.data.default_branch
+                });
+              } catch (error) {
+                core.warning(`Queue controller dispatch failed; scheduled reconciliation will retry: ${error.message}`);
+              }
             }

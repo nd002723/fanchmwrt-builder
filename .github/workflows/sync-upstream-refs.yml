@@ -1,0 +1,192 @@
+name: Sync Upstream Ref Choices
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 2 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-refs
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync upstream choices and device lists
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout builder
+        uses: actions/checkout@v5
+
+      - name: Fetch upstream tags and branches
+        uses: actions/github-script@v8
+        env:
+          UPSTREAM_REPOSITORY: fanchmwrt/fanchmwrt
+          TAGS_FILE: ${{ runner.temp }}/upstream-tags.json
+          BRANCHES_FILE: ${{ runner.temp }}/upstream-branches.json
+        with:
+          script: |
+            const [owner, repo] = process.env.UPSTREAM_REPOSITORY.split('/');
+            const tags = await github.paginate(github.rest.repos.listTags, {
+              owner,
+              repo,
+              per_page: 100
+            });
+            const names = tags.map(tag => tag.name).filter(name => typeof name === 'string');
+            if (names.length === 0) {
+              core.setFailed('Upstream repository returned no tags');
+              return;
+            }
+            require('node:fs').writeFileSync(process.env.TAGS_FILE, `${JSON.stringify(names, null, 2)}\n`);
+
+            const branches = await github.paginate(github.rest.repos.listBranches, {
+              owner,
+              repo,
+              per_page: 100
+            });
+            const branchNames = branches.map(branch => branch.name).filter(name => typeof name === 'string');
+            require('node:fs').writeFileSync(process.env.BRANCHES_FILE, `${JSON.stringify(branchNames, null, 2)}\n`);
+            core.info(`Fetched ${names.length} tags and ${branchNames.length} branches from ${process.env.UPSTREAM_REPOSITORY}`);
+            core.setOutput('count', names.length);
+
+      - name: Render Issue Form choices
+        id: render
+        run: >-
+          python3 scripts/render-upstream-refs.py
+          --tags "${{ runner.temp }}/upstream-tags.json"
+          --branches "${{ runner.temp }}/upstream-branches.json"
+          --issue-form .github/ISSUE_TEMPLATE/firmware-build.yml
+          --workflow-file .github/workflows/build.yml
+
+      - name: Checkout newest upstream release
+        uses: actions/checkout@v5
+        with:
+          repository: fanchmwrt/fanchmwrt
+          ref: ${{ steps.render.outputs.latest }}
+          path: upstream-source
+          fetch-depth: 1
+          sparse-checkout: |
+            target/linux
+            include
+            scripts
+            package
+          sparse-checkout-cone-mode: true
+
+      - name: Checkout device backports
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ vars.DEVICE_BACKPORT_REPOSITORY || 'nd002723/fanchmwrt-device-backports' }}
+          # Pin the ref that pairs with the newest release instead of trusting
+          # the default branch: the repository keeps one ref per release baseline
+          # (v<version> and its fanchmwrt-<version> maintenance branch, with
+          # `main` tracking the newest). An explicit DEVICE_BACKPORT_REF must not
+          # silently point at a different baseline than the tag checked out below,
+          # because the manifest check in the next step would then only ever warn
+          # and device-backports.tsv would stop being refreshed. Blank keeps the
+          # default branch, which is what a repository without per-release refs
+          # provides.
+          # `latest` is already the tag name including its `v` prefix (the step
+          # above checks it out as a ref), so it is used verbatim here.
+          ref: ${{ vars.DEVICE_BACKPORT_REF || steps.render.outputs.latest }}
+          path: backport-source
+          fetch-depth: 1
+        continue-on-error: true
+
+      - name: Enumerate native device profiles
+        id: native
+        run: bash ./scripts/collect-device-data.sh upstream-source "${{ runner.temp }}/devices-native.tsv" native
+
+      - name: Refresh backport device profiles
+        id: backports
+        env:
+          BACKPORT_PATCHES: ${{ runner.temp }}/devices-backports.tsv
+        run: |
+          set -euo pipefail
+          if [[ ! -f backport-source/manifest.json ]]; then
+            echo "::warning::Device backport repository is unavailable; keeping docs/device-backports.tsv"
+            echo "applied=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          base_commit="$(python3 -c "import json; print(json.load(open('backport-source/manifest.json'))['fanchmwrt']['base_commit'])")"
+          patch_count="$(python3 -c "import json; print(json.load(open('backport-source/manifest.json'))['patch_count'])")"
+          source_commit="$(git -C upstream-source rev-parse HEAD)"
+          echo "baseline=${base_commit}" >> "$GITHUB_OUTPUT"
+          echo "patches=${patch_count}" >> "$GITHUB_OUTPUT"
+
+          if [[ "$base_commit" != "$source_commit" ]]; then
+            echo "::warning::Backports target ${base_commit}, newest release is ${source_commit}; keeping docs/device-backports.tsv"
+            echo "applied=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          bash ./backport-source/scripts/apply.sh upstream-source
+          bash ./scripts/collect-device-data.sh upstream-source "$BACKPORT_PATCHES" backport
+          python3 -c "import sys; from pathlib import Path; native, patched, out = (Path(a) for a in sys.argv[1:4]); seen = {tuple(l.split(chr(9))[:4]) for l in native.read_text(encoding='utf-8').splitlines() if l.strip()}; rows = [l for l in patched.read_text(encoding='utf-8').splitlines() if l.strip() and tuple(l.split(chr(9))[:4]) not in seen]; out.write_text(''.join(r + chr(10) for r in rows), encoding='utf-8'); print(f'Recorded {len(rows)} backport-only profiles')" \
+            "${{ runner.temp }}/devices-native.tsv" "$BACKPORT_PATCHES" docs/device-backports.tsv
+          echo "applied=1" >> "$GITHUB_OUTPUT"
+
+      - name: Render device lists
+        id: devices
+        env:
+          LATEST_TAG: ${{ steps.render.outputs.latest }}
+          BACKPORT_BASELINE: ${{ steps.backports.outputs.baseline }}
+          BACKPORT_PATCHES: ${{ steps.backports.outputs.patches }}
+          BACKPORT_REPOSITORY: ${{ vars.DEVICE_BACKPORT_REPOSITORY || 'nd002723/fanchmwrt-device-backports' }}
+        run: |
+          # The docs must recommend the ref a stock configuration can actually
+          # build. That is already decided by the renderer (the maintenance
+          # branch of the newest release, falling back to its tag), so read the
+          # generated dispatch default back instead of recomputing the rule here.
+          recommended_ref="$(
+            sed -n '/BEGIN upstream_ref default/,/END upstream_ref default/p' .github/workflows/build.yml |
+              sed -n 's/^ *default: *//p'
+          )"
+          if [[ -z "$recommended_ref" ]]; then
+            echo "Cannot read the generated upstream_ref default from build.yml" >&2
+            exit 1
+          fi
+          python3 scripts/render-device-docs.py \
+            --devices "${{ runner.temp }}/devices-native.tsv" \
+            --backports docs/device-backports.tsv \
+            --aliases docs/device-aliases.json \
+            --out-dir docs \
+            --version "$LATEST_TAG" \
+            --recommended-ref "$recommended_ref" \
+            --backport-repository "$BACKPORT_REPOSITORY" \
+            --backport-baseline "${BACKPORT_BASELINE:-unknown}" \
+            --backport-patches "${BACKPORT_PATCHES:-0}"
+
+      - name: Commit synchronized files
+        id: commit
+        env:
+          LATEST_TAG: ${{ steps.render.outputs.latest }}
+          CHOICE_COUNT: ${{ steps.render.outputs.count }}
+          BACKPORT_APPLIED: ${{ steps.backports.outputs.applied }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/ISSUE_TEMPLATE/firmware-build.yml .github/workflows/build.yml docs/
+          if git diff --cached --quiet; then
+            echo "changed=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -m "chore(sync): update upstream choices and device lists for ${LATEST_TAG}"
+          git push
+          echo "changed=1" >> "$GITHUB_OUTPUT"
+          {
+            echo "Synchronized ${CHOICE_COUNT} upstream choices and the device lists."
+            echo ""
+            echo "- Newest release: \`${LATEST_TAG}\`"
+            echo "- Device backports refreshed: \`${BACKPORT_APPLIED}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report unchanged state
+        if: steps.commit.outputs.changed != '1'
+        env:
+          LATEST_TAG: ${{ steps.render.outputs.latest }}
+        run: |
+          echo "Nothing to synchronize; choices and device lists already match upstream ${LATEST_TAG}." >> "$GITHUB_STEP_SUMMARY"

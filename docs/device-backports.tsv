@@ -1,0 +1,53 @@
+ipq40xx	generic	arm_cortex-a7_neon-vfpv4	huawei_ap4050dn	"Huawei AP4050DN"	backport
+ipq40xx	generic	arm_cortex-a7_neon-vfpv4	meraki_mr20	"Cisco Meraki MR20"	backport
+ipq40xx	generic	arm_cortex-a7_neon-vfpv4	meraki_mr70	"Cisco Meraki MR70"	backport
+ipq40xx	generic	arm_cortex-a7_neon-vfpv4	meraki_z3c	"Cisco Meraki Z3C"	backport
+ipq40xx	generic	arm_cortex-a7_neon-vfpv4	sophos_apx120	"Sophos APX 120"	backport
+ipq40xx	generic	arm_cortex-a7_neon-vfpv4	tplink_deco-m5-v1	"TP-Link Deco-M5 v1"	backport
+ipq40xx	generic	arm_cortex-a7_neon-vfpv4	tplink_deco-m5-v2	"TP-Link Deco-M5 v2"	backport
+ipq40xx	generic	arm_cortex-a7_neon-vfpv4	tplink_deco-m5-v3	"TP-Link Deco-M5 v3"	backport
+mediatek	filogic	aarch64_cortex-a53	alwaylink_m01k43	"AlwayLink M01K43"	backport
+mediatek	filogic	aarch64_cortex-a53	buffalo_wsr-3000ax4p	"BUFFALO WSR-3000AX4P"	backport
+mediatek	filogic	aarch64_cortex-a53	comfast_cf-wa933	"COMFAST CF-WA933 64M"	backport
+mediatek	filogic	aarch64_cortex-a53	comfast_cf-wa933-128m	"COMFAST CF-WA933 128M"	backport
+mediatek	filogic	aarch64_cortex-a53	comfast_cf-wr632ax-ubi	"COMFAST CF-WR632AX (UBI)"	backport
+mediatek	filogic	aarch64_cortex-a53	comfast_cf-xr186	"COMFAST CF-XR186"	backport
+mediatek	filogic	aarch64_cortex-a53	elecom_wrc-x6000gsd	"ELECOM WRC-X6000GSD"	backport
+mediatek	filogic	aarch64_cortex-a53	elecom_wrc-x6000qs	"ELECOM WRC-X6000QS"	backport
+mediatek	filogic	aarch64_cortex-a53	tenda_be12-pro	"Tenda BE12 Pro"	backport
+mediatek	filogic	aarch64_cortex-a53	tplink_be450-ubi	"TP-Link BE450 (UBI)"	backport
+mediatek	filogic	aarch64_cortex-a53	zbtlink_zbt-z8803be	"Zbtlink ZBT-Z8803BE"	backport
+mediatek	mt7622	aarch64_cortex-a53	buffalo_wsr-2533dhp3	"Buffalo WSR-2533DHP3"	backport
+mediatek	mt7622	aarch64_cortex-a53	elecom_wrc-g01	"ELECOM WRC-G01"	backport
+qualcommax	ipq50xx	aarch64_cortex-a53	cmcc_rax3000q	"CMCC RAX3000Q"	backport
+qualcommax	ipq50xx	aarch64_cortex-a53	cmcc_rax3000qy	"CMCC RAX3000QY"	backport
+qualcommax	ipq50xx	aarch64_cortex-a53	elecom_wrc-x3000gst2	"ELECOM WRC-X3000GST2"	backport
+qualcommax	ipq50xx	aarch64_cortex-a53	xiaomi_redmi-ax5400	"Xiaomi Redmi AX5400"	backport
+qualcommax	ipq60xx	aarch64_cortex-a53	jdcloud_re-cs-02	"JDCloud RE-CS-02"	backport
+qualcommax	ipq60xx	aarch64_cortex-a53	jdcloud_re-cs-07	"JDCloud RE-CS-07"	backport
+qualcommax	ipq60xx	aarch64_cortex-a53	jdcloud_re-ss-01	"JDCloud RE-SS-01"	backport
+qualcommax	ipq60xx	aarch64_cortex-a53	link_nn6000-v1	"Link NN6000 v1"	backport
+qualcommax	ipq60xx	aarch64_cortex-a53	link_nn6000-v2	"Link NN6000 v2"	backport
+qualcommax	ipq60xx	aarch64_cortex-a53	netgear_rbr350	"Netgear RBR350"	backport
+qualcommax	ipq60xx	aarch64_cortex-a53	netgear_rbs350	"Netgear RBS350"	backport
+qualcommax	ipq60xx	aarch64_cortex-a53	tplink_eap620-hd-v3	"TP-Link EAP620 HD v3"	backport
+qualcommax	ipq60xx	aarch64_cortex-a53	tplink_eap623-outdoor-hd-v1	"TP-Link EAP623-Outdoor HD v1"	backport
+qualcommax	ipq807x	aarch64_cortex-a53	netgear_rbr750	"Netgear RBR750"	backport
+qualcommax	ipq807x	aarch64_cortex-a53	netgear_rbs750	"Netgear RBS750"	backport
+qualcommax	ipq807x	aarch64_cortex-a53	tcl_linkhub-hh500v	"TCL LINKHUB HH500V"	backport
+qualcommax	ipq807x	aarch64_cortex-a53	zyxel_nwa110ax	"Zyxel NWA110AX"	backport
+ramips	mt7621	mipsel_24kc	asus_rt-ac85u	"ASUS RT-AC85U"	backport
+ramips	mt7621	mipsel_24kc	comfast_cf-ew84	"COMFAST CF-EW84" "NEWFAST NF-A882"	backport
+ramips	mt7621	mipsel_24kc	elecom_wmc-c2533gst	"ELECOM WMC-C2533GST"	backport
+ramips	mt7621	mipsel_24kc	ruijie_rg-ew1300g-v1	"Ruijie RG-EW1300G v1"	backport
+ramips	mt7621	mipsel_24kc	teltonika_rutm11	"Teltonika RUTM11"	backport
+ramips	mt7621	mipsel_24kc	teltonika_rutm30	"Teltonika RUTM30" "Teltonika RUTM31"	backport
+ramips	mt7621	mipsel_24kc	teltonika_rutm50	"Teltonika RUTM50" "Teltonika RUTM51"	backport
+ramips	mt7621	mipsel_24kc	wavlink_halo-base-pro	"Wavlink Halo Base Pro"	backport
+ramips	mt7621	mipsel_24kc	z-router_zr-2662	"Z-ROUTER ZR-2662"	backport
+ramips	mt76x8	mipsel_24kc	cudy_lt400e-v1	"Cudy LT400E v1"	backport
+ramips	mt76x8	mipsel_24kc	keenetic_kn-1510	"Keenetic KN-1510"	backport
+ramips	mt76x8	mipsel_24kc	movingcomm_c120ev	"MovingComm C120EV"	backport
+ramips	mt76x8	mipsel_24kc	tplink_tl-mr6400-v7	"TP-Link TL-MR6400 v7"	backport
+ramips	mt76x8	mipsel_24kc	yuncore_1200f	"Yuncore 1200F" "KuWFi AP1200F"	backport
+sunxi	cortexa7	arm_cortex-a7_neon-vfpv4	pine64_pinecube	"Pine64 PineCube"	backport

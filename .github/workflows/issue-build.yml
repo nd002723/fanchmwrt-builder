@@ -14,12 +14,14 @@ jobs:
     name: Validate approved build request
     if: >-
       github.event.issue.state == 'open' &&
-      github.event.label.name == 'approved-build' &&
+      (github.event.label.name == 'approved-build' || github.event.label.name == 'force-build') &&
       github.event.sender.login == github.repository_owner &&
       contains(github.event.issue.labels.*.name, 'build-firmware')
     runs-on: ubuntu-22.04
     outputs:
-      upstream_ref: ${{ steps.upstream.outputs.result }}
+      upstream_ref: ${{ steps.request.outputs.upstream_ref }}
+      upstream_commit: ${{ steps.upstream.outputs.result }}
+      duplicate: ${{ steps.duplicate.outputs.duplicate }}
       architecture: ${{ steps.request.outputs.architecture }}
       target: ${{ steps.request.outputs.target }}
       subtarget: ${{ steps.request.outputs.subtarget }}
@@ -59,6 +61,7 @@ jobs:
           fetch-depth: 1
 
       - name: Resolve FanchmWrt device profile
+        id: target
         env:
           TARGET: ${{ steps.request.outputs.target }}
           SUBTARGET: ${{ steps.request.outputs.subtarget }}
@@ -68,7 +71,204 @@ jobs:
           DEVICE_BACKPORT_REF: ${{ vars.DEVICE_BACKPORT_REF || 'main' }}
         run: bash ./scripts/resolve-device-profile.sh target-source "$TARGET" "$SUBTARGET" "$PROFILE" "$ARCHITECTURE"
 
+      # The owner label is a side door: it never passes the duplicate and reuse
+      # checks the automatic review runs on issue open.  Repeat the same
+      # comparison here so an already successful build with a live artifact is
+      # handed back to the requester instead of being compiled a second time.
+      - name: Check for an existing successful build
+        id: duplicate
+        if: ${{ steps.target.outcome == 'success' }}
+        uses: actions/github-script@v8
+        env:
+          UPSTREAM_COMMIT: ${{ steps.upstream.outputs.result }}
+          UPSTREAM_REF: ${{ steps.request.outputs.upstream_ref }}
+          ARCHITECTURE: ${{ steps.request.outputs.architecture }}
+          TARGET: ${{ steps.request.outputs.target }}
+          SUBTARGET: ${{ steps.request.outputs.subtarget }}
+          PROFILE: ${{ steps.request.outputs.profile }}
+        with:
+          script: |
+            const crypto = require('crypto');
+            const { owner, repo } = context.repo;
+            const issueNumber = context.issue.number;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            core.setOutput('duplicate', '0');
+
+            // The job-level `if` matched on github.event.issue.labels, which is
+            // the snapshot taken before this run's label event was applied. On
+            // `labeled` that snapshot still carries the earlier labels but not
+            // the one that fired the run, so re-reading the issue gives the
+            // authoritative list -- in particular whether `force-build` is still
+            // attached now that the owner may have changed their mind.
+            const current = await github.rest.issues.get({
+              owner, repo, issue_number: issueNumber
+            });
+            const currentLabels = current.data.labels.map(label =>
+              typeof label === 'string' ? label : label.name
+            );
+            if (currentLabels.includes('force-build')) {
+              core.notice('force-build is set; skipping the duplicate and reuse check.');
+              return;
+            }
+
+            const identity = [
+              process.env.UPSTREAM_COMMIT,
+              process.env.ARCHITECTURE,
+              process.env.TARGET,
+              process.env.SUBTARGET,
+              process.env.PROFILE
+            ].join('\n');
+            const fingerprint = crypto.createHash('sha256').update(identity).digest('hex');
+            const reuseCutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+            const approvedIssues = await github.paginate(
+              github.rest.issues.listForRepo,
+              {
+                owner,
+                repo,
+                state: 'all',
+                labels: 'approved-build',
+                sort: 'updated',
+                direction: 'desc',
+                per_page: 100
+              },
+              (response, done) => {
+                const recent = response.data.filter(issue =>
+                  !issue.pull_request &&
+                  issue.number !== issueNumber &&
+                  issue.updated_at >= reuseCutoff
+                );
+                if (response.data.some(issue => issue.updated_at < reuseCutoff)) done();
+                return recent;
+              }
+            );
+
+            const commentGroups = await Promise.all(approvedIssues.map(async issue => ({
+              issue,
+              comments: await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: issue.number, per_page: 100
+              })
+            })));
+
+            const fingerprintPattern = /<!-- fanchmwrt-build fingerprint=([a-f0-9]{64}) -->/;
+            const runPattern = /\/actions\/runs\/(\d+)/;
+            const botComments = commentGroups.flatMap(group =>
+              group.comments
+                .filter(comment =>
+                  comment.user?.login === 'github-actions[bot]' &&
+                  comment.created_at >= reuseCutoff
+                )
+                .map(comment => ({ ...comment, issue_number: group.issue.number }))
+            );
+
+            const fingerprintedRuns = new Set();
+            for (const comment of botComments) {
+              const body = comment.body || '';
+              const runMatch = body.match(runPattern);
+              if (runMatch && fingerprintPattern.test(body)) fingerprintedRuns.add(runMatch[1]);
+            }
+
+            // Legacy comments predate the fingerprint marker; accept them only
+            // when no marker exists for that run, mirroring the automatic review.
+            const expectedLegacyLines = [
+              `- 上游版本：\`${process.env.UPSTREAM_REF}\``,
+              `- 架构：\`${process.env.ARCHITECTURE}\``,
+              `- 目标：\`${process.env.TARGET}/${process.env.SUBTARGET}/${process.env.PROFILE}\``
+            ];
+            const candidates = [];
+            for (const comment of botComments) {
+              const body = comment.body || '';
+              const runMatch = body.match(runPattern);
+              if (!runMatch) continue;
+              const markerMatch = body.match(fingerprintPattern);
+              const exactMatch = markerMatch?.[1] === fingerprint;
+              const legacyMatch = !markerMatch &&
+                !fingerprintedRuns.has(runMatch[1]) &&
+                expectedLegacyLines.every(line => body.includes(line));
+              if (exactMatch || legacyMatch) {
+                candidates.push({
+                  run_id: Number(runMatch[1]),
+                  issue_number: comment.issue_number
+                });
+              }
+            }
+
+            let duplicate;
+            for (const candidate of candidates) {
+              try {
+                const run = await github.rest.actions.getWorkflowRun({
+                  owner, repo, run_id: candidate.run_id
+                });
+                if (run.data.conclusion !== 'success') continue;
+                const artifacts = await github.paginate(
+                  github.rest.actions.listWorkflowRunArtifacts,
+                  { owner, repo, run_id: candidate.run_id, per_page: 100 }
+                );
+                if (!artifacts.some(artifact => !artifact.expired)) continue;
+                duplicate = candidate;
+                break;
+              } catch (error) {
+                if (error.status === 404) continue;
+                throw error;
+              }
+            }
+
+            if (!duplicate) {
+              core.notice(`No reusable build for ${process.env.TARGET}/${process.env.SUBTARGET}/${process.env.PROFILE} at ${process.env.UPSTREAM_COMMIT}.`);
+              return;
+            }
+
+            core.setOutput('duplicate', '1');
+            core.notice(`Reusing run ${duplicate.run_id} from issue #${duplicate.issue_number}.`);
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: 'force-build' });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              await github.rest.issues.createLabel({
+                owner,
+                repo,
+                name: 'force-build',
+                color: '5319e7',
+                description: 'Owner-only: rebuild even when an identical successful build still has artifacts'
+              });
+            }
+            for (const name of ['build-review-pending', 'build-queued', 'build-dispatching', 'needs-owner-review']) {
+              try {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNumber, name });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+            }
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: issueNumber,
+              body: [
+                '检测到过去 30 天内已有相同设备和上游提交的成功构建，本次批准不会重复编译，请直接下载既有产物。',
+                '',
+                `- 上游提交：\`${process.env.UPSTREAM_COMMIT}\``,
+                `- 目标：\`${process.env.TARGET}/${process.env.SUBTARGET}/${process.env.PROFILE}\``,
+                `- [查看原申请 #${duplicate.issue_number}](${context.serverUrl}/${owner}/${repo}/issues/${duplicate.issue_number})`,
+                `- [下载之前的构建产物](${context.serverUrl}/${owner}/${repo}/actions/runs/${duplicate.run_id})`,
+                '',
+                '确实需要重新编译时：移除 `approved-build`，再由仓库所有者添加 `force-build` 标签。',
+                '',
+                `[查看本次 Actions 运行](${runUrl})`
+              ].join('\n')
+            });
+            // A duplicate is not a failure: leave the issue open and only tag it.
+            // Closing here forced the owner to reopen before adding `force-build`,
+            // and a reopen fires the automatic review again, which would then have
+            // to be suppressed all over again.
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number: issueNumber,
+              labels: ['duplicate']
+            });
+
       - name: Report accepted request
+        if: steps.duplicate.outputs.duplicate == '0'
         uses: actions/github-script@v8
         env:
           UPSTREAM_REF: ${{ steps.request.outputs.upstream_ref }}
@@ -96,7 +296,7 @@ jobs:
               '仓库所有者已批准此请求，参数校验通过并开始编译。',
               '',
               `- 上游版本：\`${process.env.UPSTREAM_REF}\``,
-              `- 上游提交：\`${process.env.UPSTREAM_COMMIT}\``,
+              `- 实际编译提交：\`${process.env.UPSTREAM_COMMIT}\``,
               `- 架构：\`${process.env.ARCHITECTURE}\``,
               `- 目标：\`${process.env.TARGET}/${process.env.SUBTARGET}/${process.env.PROFILE}\``,
               `- [查看 Actions 运行](${runUrl})`
@@ -111,9 +311,10 @@ jobs:
   build:
     name: Build requested firmware
     needs: parse
+    if: needs.parse.outputs.duplicate == '0'
     uses: ./.github/workflows/build.yml
     with:
-      upstream_ref: ${{ needs.parse.outputs.upstream_ref }}
+      upstream_ref: ${{ needs.parse.outputs.upstream_commit }}
       architecture: ${{ needs.parse.outputs.architecture }}
       target: ${{ needs.parse.outputs.target }}
       subtarget: ${{ needs.parse.outputs.subtarget }}
@@ -127,7 +328,7 @@ jobs:
     if: >-
       always() &&
       github.event.issue.state == 'open' &&
-      github.event.label.name == 'approved-build' &&
+      (github.event.label.name == 'approved-build' || github.event.label.name == 'force-build') &&
       github.event.sender.login == github.repository_owner &&
       contains(github.event.issue.labels.*.name, 'build-firmware')
     runs-on: ubuntu-22.04

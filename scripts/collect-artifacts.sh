@@ -24,7 +24,6 @@ for source_file in "$target_dir"/*; do
 done
 (( firmware_found == 1 )) || { echo "No firmware image found in $target_dir" >&2; exit 1; }
 
-cp "$builder_root/assets/first-extroot-sysupgrade.sh" "$artifact_dir/"
 cat > "$artifact_dir/BUILD-METADATA.txt" <<EOF
 Builder version: $(tr -d '\r\n' < "$builder_root/VERSION")
 Upstream repository: https://github.com/fanchmwrt/fanchmwrt
@@ -56,5 +55,8 @@ Upgrade policy:
 - unowned regular files and symlinks are restored only when the new root has no matching path and
   the path was not registered to an old package replaced by the new firmware.
 - failed migrations retain backups for rollback; successful migrations remove them.
-- use first-extroot-sysupgrade.sh for the first upgrade from firmware without this package.
+- upgrades keep the external overlay mounted: /etc/init.d/extroot-post-upgrade repairs a reset
+  fstab entry and merges the overlay-only packages into the firmware apk database once at boot.
+- the migration helper is no longer shipped; it disabled extroot before sysupgrade and could
+  leave the fstab entry disabled when the upgrade failed.
 EOF

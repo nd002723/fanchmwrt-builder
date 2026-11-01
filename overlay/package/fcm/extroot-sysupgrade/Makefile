@@ -24,6 +24,7 @@ endef
 define Package/extroot-sysupgrade/install
 	$(INSTALL_DIR) $(1)/etc/init.d $(1)/etc/uci-defaults $(1)/lib/upgrade/keep.d $(1)/usr/libexec
 	$(INSTALL_BIN) ./files/extroot-sysupgrade.init $(1)/etc/init.d/extroot-sysupgrade
+	$(INSTALL_BIN) ./files/extroot-post-upgrade.init $(1)/etc/init.d/extroot-post-upgrade
 	$(INSTALL_BIN) ./files/95-extroot-sysupgrade $(1)/etc/uci-defaults/95-extroot-sysupgrade
 	$(INSTALL_DATA) ./files/extroot-sysupgrade.sh $(1)/lib/upgrade/90-extroot-sysupgrade.sh
 	echo /etc/config/ddnsto > $(1)/lib/upgrade/keep.d/ddnsto

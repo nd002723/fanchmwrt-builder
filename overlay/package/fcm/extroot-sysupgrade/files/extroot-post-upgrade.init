@@ -1,0 +1,292 @@
+#!/bin/sh /etc/rc.common
+# extroot post-upgrade handling (single invocation)
+#
+# Why this is needed:
+#   FanchmWrt ships extroot-sysupgrade as a hook + multi-stage state machine
+#   (prepare -> reinstall -> reboot -> complete). It relies on
+#       append sysupgrade_post_backup_hooks extroot_sysupgrade_prepare_backup
+#   to write phase=prepare into the backup archive before upgrading. But
+#   /sbin/sysupgrade in 25.12.x no longer calls sysupgrade_post_backup_hooks
+#   (grep on the device finds only the definition, no consumer), so phase is
+#   never written and the whole migration never even starts. In practice the
+#   configuration survives only because /overlay physically lives on the
+#   external disk and sysupgrade only writes mtd3. That leaves a real gap: the
+#   apk database of packages installed inside extroot lives in
+#   /overlay/upper/lib/apk/db/installed while the new firmware records its own
+#   records in /rom. After the upgrade the overlay copy wins, so packages the
+#   new firmware added or upgraded look uninstalled to apk, which then sees a
+#   database that disagrees with the files on disk.
+#
+# Approach (following iStoreOS /etc/init.d/isos_upgrade, adapted for apk):
+#   Do nothing during the upgrade; merge both apk databases once at boot:
+#     - package present in /rom: always use the firmware record (its version
+#       and checksums are current)
+#     - package only in overlay: keep the overlay record (user-installed)
+#   Detect a fresh upgrade without hooks by comparing DISTRIB_REVISION in /rom
+#   with the version recorded last time; that record lives on extroot, so it
+#   physically follows the external disk and is never wiped by an upgrade.
+#
+# START=20 is deliberate, sitting between the two ends:
+#   - later than dropbear (S19), so SSH is up before any reboot we trigger;
+#   - earlier than the old extroot-sysupgrade state machine (S96), so we can
+#     disable it before it runs.
+#   The former 15 ran before dropbear, so a reboot would land before SSH was
+#   ready -- closing our own escape hatch. 99 ran after S96, so the old state
+#   machine started first and disabling it was always too late.
+
+START=20
+
+STATE=/overlay/.extroot-last-revision
+REBOOT_FLAG=/etc/.extroot-reboot-done
+EXROOT_FLAG=/overlay/upper/.extroot-reboot-done
+# /tmp lasts only for this boot: /etc switches sides across an overlay change,
+# so only /tmp is unaffected by it.
+BOOT_FLAG=/tmp/.extroot-reboot-done
+ROM_DB=/rom/lib/apk/db/installed
+UPPER_DB=/overlay/upper/lib/apk/db/installed
+LIVE_DB=/lib/apk/db/installed
+TAG=extroot-post-upgrade
+
+log() {
+	logger -t "$TAG" -- "$*"
+	echo "$TAG: $*"
+}
+
+rom_revision() {
+	sed -n "s/^DISTRIB_REVISION='\(.*\)'/\1/p" /rom/etc/openwrt_release 2>/dev/null | head -n 1
+}
+
+# Append the sections for overlay-only packages to the target database
+append_overlay_only() {
+	local rom_db="$1" upper_db="$2" out="$3"
+	local pkgs=/tmp/.extroot-pkgs.$$
+
+	awk -F: '/^P:/{print $2}' "$rom_db" 2>/dev/null | sort -u > "$pkgs.rom"
+	awk -F: '/^P:/{print $2}' "$upper_db" 2>/dev/null | sort -u > "$pkgs.up"
+
+	# present in upper but not in rom = installed by the user
+	awk 'NR == FNR { have[$0] = 1; next } !($0 in have)' "$pkgs.rom" "$pkgs.up" > "$pkgs.extra"
+
+	cp "$rom_db" "$out" || { rm -f "$pkgs".*; return 1; }
+
+	# Copy each overlay-only package record. apk 3.x requires every record to
+	# start with C:, otherwise the whole database fails with "v2 database format
+	# error" and no package resolves. Packages slipped into overlay by hand
+	# (never installed through apk add) carry no C: line, so emit a valid
+	# placeholder for them here.
+	# error" and no package resolves. Packages slipped into overlay by hand never
+	[ -s "$pkgs.extra" ] && awk -v extra="$pkgs.extra" '
+		BEGIN {
+			while ((getline p < extra) > 0) want[p] = 1
+			close(extra)
+			RS = ""
+			ORS = "\n\n"
+		}
+		{
+			has_c = ($0 ~ /^C:/)
+			pkg = ""
+			n = split($0, line, "\n")
+			for (i = 1; i <= n; i++) {
+				if (line[i] ~ /^P:/) { pkg = substr(line[i], 3); break }
+			}
+			if (pkg != "" && (pkg in want)) {
+				if (!has_c) print "C:Q1AAAAAAAAAAAAAAAAAAAAAAAAAAA="
+				print $0
+			}
+		}
+	' "$upper_db" >> "$out"
+
+	rm -f "$pkgs".*
+	return 0
+}
+
+# After an upgrade the old firmware's feeds in overlay shadow the ones the
+# new release ships and point at a release that no longer exists. Overwrite
+# with the /rom copy: the version comes from the firmware itself, the script
+# hardcodes no version.
+sync_distfeeds() {
+	local rom_feeds=/rom/etc/apk/repositories.d/distfeeds.list
+	local live_feeds=/etc/apk/repositories.d/distfeeds.list
+
+	[ -f "$rom_feeds" ] || return 0
+	if [ -f "$live_feeds" ] && cmp -s "$rom_feeds" "$live_feeds"; then
+		return 0
+	fi
+	if [ ! -d "$(dirname "$live_feeds")" ]; then
+		log "no apk repositories.d directory, leaving feeds alone"
+		return 0
+	fi
+	cp "$rom_feeds" "$live_feeds" 2>/dev/null || {
+		log "cannot update $live_feeds"
+		return 0
+	}
+	log "updated apk feeds from firmware: $(head -n 1 "$live_feeds")"
+	return 0
+}
+
+merge_apk_db() {
+	[ -f "$ROM_DB" ] || { log "no firmware apk database, skip"; return 0; }
+	[ -f "$UPPER_DB" ] || { log "overlay has no apk database, nothing to merge"; return 0; }
+	[ -f "$LIVE_DB" ] || { log "live apk database missing, skip"; return 0; }
+
+	# Nothing to do when both sides are identical
+	cmp -s "$ROM_DB" "$UPPER_DB" && { log "apk databases identical, skip"; return 0; }
+
+	local tmp=/tmp/.extroot-installed.$$
+	if ! append_overlay_only "$ROM_DB" "$UPPER_DB" "$tmp"; then
+		log "merge failed, keeping the current database"
+		rm -f "$tmp"
+		return 1
+	fi
+
+	# The merge must cover every package of the new firmware; otherwise leave it
+	local rom_n up_n new_n
+	rom_n=$(awk -F: '/^P:/' "$ROM_DB" | wc -l)
+	up_n=$(awk -F: '/^P:/' "$UPPER_DB" | wc -l)
+	new_n=$(awk -F: '/^P:/' "$tmp" | wc -l)
+	if [ "$new_n" -lt "$rom_n" ]; then
+		log "merged database has fewer packages ($new_n < $rom_n), abort"
+		rm -f "$tmp"
+		return 1
+	fi
+
+	cp -p "$LIVE_DB" "$LIVE_DB.pre-merge" 2>/dev/null
+	cp "$tmp" "$LIVE_DB" || { log "cannot write $LIVE_DB"; rm -f "$tmp"; return 1; }
+	rm -f "$tmp"
+	log "merged apk database: firmware=$rom_n overlay=$up_n result=$new_n"
+	return 0
+}
+
+# If the extroot configuration was reset (enabled=0 or a wrong target), point
+# Return 0 when nothing changed, 1 when a change needs a reboot to take effect.
+repair_fstab() {
+	local section changed=0
+
+#   Leave fstab completely alone when no external disk exists. Such devices
+#   never use extroot, and the firmware default fstab is a uci-defaults block
+#   detect artifact carrying target '/mnt/sda1'; rewriting it to '/overlay'
+#   would make every boot try to mount a disk that is not there and flood the
+#   log with mount failures.
+#   never use extroot, and the firmware default fstab is a uci-defaults block
+#   detect artifact carrying target '/mnt/sda1'; rewriting it to '/overlay'
+	block info 2>/dev/null | grep -qE '^/dev/(sd[a-z]|mmcblk|nvme)' || return 0
+	section=$(uci -q show fstab | sed -n "s/^fstab\.\(@mount\[[0-9]*\]\)\.target='\/overlay'$/\1/p" | head -n 1)
+	if [ -z "$section" ]; then
+		# No section carries target=/overlay. After a full mtd flash fstab is the
+		# uci-defaults block detect output, which spells device '/dev/sda1' instead
+		# of a uuid, so both spellings must be accepted or the section is missed
+		# and nothing happens silently.
+		# of a uuid, so both spellings must be accepted or the section is found
+		section=$(uci -q show fstab | sed -n "s/^fstab\.\(@mount\[[0-9]*\]\)\.uuid='[^']\{8,\}'$/\1/p" | head -n 1)
+	fi
+	if [ -z "$section" ]; then
+		section=$(uci -q show fstab | sed -n "s/^fstab\.\(@mount\[[0-9]*\]\)\.device='\/dev\/sd[a-z][0-9]*'$/\1/p" | head -n 1)
+	fi
+	[ -n "$section" ] || return 0
+	if [ "$(uci -q get "fstab.$section.target")" != "/overlay" ]; then
+		uci -q set "fstab.$section.target=/overlay" && changed=1
+	fi
+	if [ "$(uci -q get "fstab.$section.enabled")" != "1" ]; then
+		uci -q set "fstab.$section.enabled=1" && changed=1
+	fi
+	[ "$changed" = "1" ] || return 0
+	uci -q commit fstab || { log "fstab commit failed, not rebooting"; return 0; }
+
+	# Read it back to prove it was really persisted. A change that does not take
+	# effect would reboot forever.
+	local target enabled
+	target=$(uci -q get "fstab.$section.target")
+	enabled=$(uci -q get "fstab.$section.enabled")
+	if [ "$target" != "/overlay" ] || [ "$enabled" != "1" ]; then
+		log "fstab repair did not persist (target='$target' enabled='$enabled'), not rebooting"
+		return 0
+	fi
+	log "repaired extroot mount section $section"
+	return 1
+}
+
+# No automatic reboot by default. Unattended setups can opt in through an
+# environment variable or a switch file.
+autoreboot_enabled() {
+	[ "${EXTROOT_POST_UPGRADE_AUTOREBOOT:-1}" = "0" ] && return 1
+	[ -f /etc/extroot-post-upgrade-no-autoreboot ] && return 1
+	return 0
+}
+
+# fstab is fixed but this boot is too late to mount it; reboot once to apply.
+# Reboot only once the marker really landed: insisting while it cannot be
+# written (full or read-only overlay) is an endless reboot loop. The marker is
+# written to both /etc and the extroot upper, covering both the mounted and the
+# unmounted external-disk boot states.
+# written (full or read-only overlay) is an endless reboot loop. The marker is
+reboot_once() {
+	local flag wrote=0
+
+	# Decide about the reboot first and write the marker after; the other order
+	# would burn the allowance for nothing.
+	if ! autoreboot_enabled; then
+		log "fstab repaired; reboot once to bring the external overlay back"
+		return 0
+	fi
+
+	# At most one reboot per boot. This marker lives in /tmp, dies with the boot
+	# and is unaffected by an overlay switch.
+	[ -f "$BOOT_FLAG" ] && { log "a reboot is already scheduled in this boot"; return 0; }
+
+	for flag in "$REBOOT_FLAG" "$EXROOT_FLAG"; do
+		[ -f "$flag" ] && { log "already rebooted once for fstab repair, leaving it alone"; return 0; }
+	done
+	for flag in "$BOOT_FLAG" "$REBOOT_FLAG" "$EXROOT_FLAG"; do
+		if : > "$flag" 2>/dev/null; then
+			wrote=1
+		fi
+	done
+	if [ "$wrote" != "1" ]; then
+		log "cannot record the reboot marker, staying up instead of looping"
+		return 0
+	fi
+	log "rebooting once so the repaired extroot mount takes effect"
+	sync
+	sleep 2
+	reboot
+}
+
+# The old multi-stage migration state machine (START=96) overlaps with what
+# this script does, and fights for the install directory. Folding it into the
+# upgrade means it is not needed, so disable it outright.
+# upgrade means it is not needed, so disable it outright.
+disable_legacy_migration() {
+	local legacy=/etc/init.d/extroot-sysupgrade
+	[ -x "$legacy" ] || return 0
+	[ -e /etc/rc.d/S96extroot-sysupgrade ] || return 0
+	"$legacy" disable 2>/dev/null && log "disabled the legacy extroot-sysupgrade state machine"
+	rm -f /etc/extroot-sysupgrade/phase 2>/dev/null
+}
+
+boot() {
+	disable_legacy_migration
+
+	# When extroot is not mounted, fix fstab first and reboot once it changed
+	# so the mount takes effect.
+	if [ ! -d /overlay/upper ]; then
+		repair_fstab || reboot_once
+		return 0
+	fi
+
+	repair_fstab || reboot_once
+
+	local current last
+	current=$(rom_revision)
+	[ -n "$current" ] || return 0
+	last=$(cat "$STATE" 2>/dev/null)
+
+	if [ "$current" = "$last" ]; then
+		return 0
+	fi
+
+	log "firmware revision changed: '${last:-<none>}' -> '$current'"
+	sync_distfeeds
+	merge_apk_db
+	printf '%s\n' "$current" > "$STATE" 2>/dev/null ||
+		log "cannot record revision to $STATE"
+}

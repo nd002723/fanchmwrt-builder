@@ -6,6 +6,7 @@ luci-app-ttyd
 cfdisk
 e2fsprogs
 nano-full
+curl
 openssh-sftp-server
 extroot-sysupgrade
 
