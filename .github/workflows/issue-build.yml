@@ -20,6 +20,8 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       upstream_ref: ${{ steps.request.outputs.upstream_ref }}
+      upstream_selection: ${{ steps.request.outputs.upstream_selection }}
+      upstream_override: ${{ steps.request.outputs.upstream_override }}
       upstream_commit: ${{ steps.upstream.outputs.result }}
       duplicate: ${{ steps.duplicate.outputs.duplicate }}
       architecture: ${{ steps.request.outputs.architecture }}
@@ -68,8 +70,20 @@ jobs:
           PROFILE: ${{ steps.request.outputs.profile }}
           ARCHITECTURE: ${{ steps.request.outputs.architecture }}
           DEVICE_BACKPORT_REPOSITORY: ${{ vars.DEVICE_BACKPORT_REPOSITORY || 'nd002723/fanchmwrt-device-backports' }}
-          DEVICE_BACKPORT_REF: ${{ vars.DEVICE_BACKPORT_REF || 'main' }}
-        run: bash ./scripts/resolve-device-profile.sh target-source "$TARGET" "$SUBTARGET" "$PROFILE" "$ARCHITECTURE"
+          DEVICE_BACKPORT_REF: ${{ vars.DEVICE_BACKPORT_REF }}
+          DEVICE_BACKPORT_SELECTION: ${{ steps.request.outputs.upstream_selection }}
+          DEVICE_BACKPORT_OVERRIDE: ${{ steps.request.outputs.upstream_override }}
+        run: |
+          set -euo pipefail
+          # Same candidates as the build, in the same order (scripts/backport-ref.sh
+          # owns the rule): the pinned branch, an explicit override, then the release
+          # the requester selected. A review that picks a different series than the
+          # build applies rejects devices that would have built.
+          backport_ref="$(bash ./scripts/backport-ref.sh "${DEVICE_BACKPORT_REF:-}" \
+            "${DEVICE_BACKPORT_OVERRIDE:-}" "${DEVICE_BACKPORT_SELECTION:-}")"
+          echo "Device backport ref: ${backport_ref:-<default branch>}"
+          DEVICE_BACKPORT_REF="$backport_ref" bash ./scripts/resolve-device-profile.sh \
+            target-source "$TARGET" "$SUBTARGET" "$PROFILE" "$ARCHITECTURE"
 
       # The owner label is a side door: it never passes the duplicate and reuse
       # checks the automatic review runs on issue open.  Repeat the same
@@ -220,6 +234,7 @@ jobs:
             });
             // A duplicate is not a failure: leave the issue open and only tag it,
             // so the owner can add `force-build` without reopening it.
+            await ensureLabel(github, context, 'duplicate');
             await github.rest.issues.addLabels({
               owner, repo, issue_number: issueNumber, labels: ['duplicate']
             });
@@ -272,6 +287,10 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       upstream_ref: ${{ needs.parse.outputs.upstream_commit }}
+      # A resolved commit cannot name a device backport branch; the release the
+      # requester selected can, and it is the same one the review stage used.
+      upstream_ref_name: ${{ needs.parse.outputs.upstream_selection }}
+      upstream_ref_override: ${{ needs.parse.outputs.upstream_override }}
       architecture: ${{ needs.parse.outputs.architecture }}
       target: ${{ needs.parse.outputs.target }}
       subtarget: ${{ needs.parse.outputs.subtarget }}
@@ -290,11 +309,17 @@ jobs:
       contains(github.event.issue.labels.*.name, 'build-firmware')
     runs-on: ubuntu-22.04
     steps:
+      # The script below requires scripts/lib/labels.js, which resolves against
+      # the workspace.
+      - name: Checkout builder
+        uses: actions/checkout@v5
+
       - name: Comment on issue
         uses: actions/github-script@v8
         env:
           PARSE_RESULT: ${{ needs.parse.result }}
           BUILD_RESULT: ${{ needs.build.result }}
+          DUPLICATE: ${{ needs.parse.outputs.duplicate }}
           UPSTREAM_COMMIT: ${{ needs.build.outputs.upstream_commit }}
           ARCHITECTURE: ${{ needs.parse.outputs.architecture }}
           TARGET: ${{ needs.parse.outputs.target }}
@@ -303,9 +328,16 @@ jobs:
         with:
           script: |
             const crypto = require('crypto');
+            const { ensureLabel } = require('./scripts/lib/labels.js');
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             let summary;
             let marker = '';
+            // A duplicate is not a failed build: the duplicate step already
+            // answered the requester and left the issue open on purpose, and the
+            // build job was skipped rather than run.
+            if (process.env.DUPLICATE === '1') {
+              return;
+            }
             if (process.env.PARSE_RESULT !== 'success') {
               summary = '构建请求参数校验失败，未触发编译。请修正模板字段；重试时由仓库所有者移除后重新添加 `approved-build` 标签。';
             } else if (process.env.BUILD_RESULT === 'success') {

@@ -63,6 +63,16 @@ on:
         description: Upstream branch, tag, or full commit SHA
         required: true
         type: string
+      upstream_ref_name:
+        description: Release the caller selected, so the device backport ref can be derived when upstream_ref is a commit
+        required: false
+        type: string
+        default: ''
+      upstream_ref_override:
+        description: Commit the caller pinned, which also decides the device backport ref
+        required: false
+        type: string
+        default: ''
       architecture:
         description: Package architecture family
         required: true
@@ -128,26 +138,45 @@ jobs:
 
       # The release name is what the backport repository keeps its branches under.
       # `fanchmwrt-25.12.6` is a builder-side ref that has no counterpart there, so
-      # the tag is derived from it; anything else (a tag, a full commit) is passed
-      # through unchanged, and an empty value lets resolve-device-profile.sh pick
-      # the default branch before manifest.json validates it.
+      # the tag is derived from it.
+      #
+      # A workflow_call carries the resolved commit in `upstream_ref` -- a SHA says
+      # nothing about which release the device backports belong to, and asking for
+      # it by SHA silently falls back to the default branch, which carries the
+      # newest series. The caller therefore also passes the release it selected in
+      # `upstream_ref_name`.
+      #
+      # The candidates are tried in this order, and scripts/backport-ref.sh owns
+      # the rule so the review stages apply the patch set this build will:
+      #   1. DEVICE_BACKPORT_REF (an owner pins the branch)
+      #   2. upstream_ref_override -- an explicit "build this commit" request has to
+      #      decide the patch set too, otherwise the documented escape hatch of
+      #      pinning a baseline commit is defeated by the dropdown next to it
+      #   3. upstream_ref_name -- the release a caller selected
+      #   4. the dispatch dropdown
+      # An empty result lets resolve-device-profile.sh discover the default branch
+      # before manifest.json validates it.
       - name: Derive device backport ref
         id: backport-ref
         env:
+          EVENT_NAME: ${{ github.event_name }}
           REQUESTED_REF: ${{ vars.DEVICE_BACKPORT_REF }}
+          SELECTED_NAME: ${{ inputs.upstream_ref_name }}
           PINNED_REF: ${{ inputs.upstream_ref_override }}
           SELECTED_REF: ${{ inputs.upstream_ref }}
         run: |
           set -euo pipefail
-          ref="${REQUESTED_REF:-${PINNED_REF:-${SELECTED_REF}}}"
-          if [[ "$ref" == fanchmwrt-* ]]; then
-            ref="v${ref#fanchmwrt-}"
+          # On workflow_call, upstream_ref holds the resolved commit, which no
+          # repository has a branch for: passing it as a candidate would only buy a
+          # failed fetch before the default branch. Without a release name or an
+          # override, ask for nothing and let the resolver discover that branch.
+          if [[ "${EVENT_NAME}" == "workflow_call" ]]; then
+            fallback=""
+          else
+            fallback="${SELECTED_REF:-}"
           fi
-          case "$ref" in
-            # Nothing usable to pin: let the script resolve the default branch.
-            ""|*[!A-Za-z0-9._/-]*|@*|*/|*..*) ref="" ;;
-            -*|*@*) ref="" ;;
-          esac
+          ref="$(bash ./scripts/backport-ref.sh \
+            "${REQUESTED_REF:-}" "${PINNED_REF:-}" "${SELECTED_NAME:-}" "$fallback")"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
           echo "Device backport ref: ${ref:-<default branch>}"
 

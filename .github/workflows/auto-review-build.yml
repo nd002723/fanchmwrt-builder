@@ -101,8 +101,20 @@ jobs:
           PROFILE: ${{ steps.request.outputs.profile }}
           ARCHITECTURE: ${{ steps.request.outputs.architecture }}
           DEVICE_BACKPORT_REPOSITORY: ${{ vars.DEVICE_BACKPORT_REPOSITORY || 'nd002723/fanchmwrt-device-backports' }}
-          DEVICE_BACKPORT_REF: ${{ vars.DEVICE_BACKPORT_REF || 'main' }}
-        run: bash ./scripts/resolve-device-profile.sh target-source "$TARGET" "$SUBTARGET" "$PROFILE" "$ARCHITECTURE"
+          DEVICE_BACKPORT_REF: ${{ vars.DEVICE_BACKPORT_REF }}
+          DEVICE_BACKPORT_SELECTION: ${{ steps.request.outputs.upstream_selection }}
+          DEVICE_BACKPORT_OVERRIDE: ${{ steps.request.outputs.upstream_override }}
+        run: |
+          set -euo pipefail
+          # Same candidates as the build, in the same order (scripts/backport-ref.sh
+          # owns the rule): the pinned branch, an explicit override, then the release
+          # the requester selected. A review that picks a different series than the
+          # build applies rejects devices that would have built.
+          backport_ref="$(bash ./scripts/backport-ref.sh "${DEVICE_BACKPORT_REF:-}" \
+            "${DEVICE_BACKPORT_OVERRIDE:-}" "${DEVICE_BACKPORT_SELECTION:-}")"
+          echo "Device backport ref: ${backport_ref:-<default branch>}"
+          DEVICE_BACKPORT_REF="$backport_ref" bash ./scripts/resolve-device-profile.sh \
+            target-source "$TARGET" "$SUBTARGET" "$PROFILE" "$ARCHITECTURE"
 
       - name: Report invalid OpenWrt target
         if: steps.target.outcome != 'success' && steps.target.outcome != 'skipped'
@@ -230,6 +242,7 @@ jobs:
             });
 
             if (duplicate) {
+              await ensureLabel(github, context, 'duplicate');
               await github.rest.issues.addLabels({
                 owner, repo, issue_number: context.issue.number, labels: ['duplicate']
               });

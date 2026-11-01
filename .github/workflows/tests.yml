@@ -48,6 +48,18 @@ jobs:
       - name: Test shared label definitions
         run: node ./scripts/test-labels.js
 
+      # The workflows share contracts with each other and with scripts/: a job
+      # that requires a local module without a checkout, a helper called without
+      # its import, a needs.<job>.outputs that is not declared, or a missing
+      # reusable-workflow input all broke a production run at least once.
+      - name: Test workflow contracts
+        run: python3 ./scripts/test-workflow-contracts.py
+
+      # One rule decides which device backport branch a request asks for; the
+      # review stages and the build they dispatch must not disagree about it.
+      - name: Test device backport ref derivation
+        run: bash ./scripts/test-backport-ref.sh
+
       - name: Test extroot overlay selection
         run: |
           bash ./scripts/test-extroot-overlay-selection.sh \

@@ -19,6 +19,12 @@ jobs:
     name: Reconcile automatic build slots
     runs-on: ubuntu-22.04
     steps:
+      # The script below requires scripts/lib/labels.js, and a require resolves
+      # against the workspace: without this checkout the job dies with
+      # MODULE_NOT_FOUND before it ever looks at the queue.
+      - name: Checkout builder
+        uses: actions/checkout@v5
+
       - name: Promote or defer queued requests
         uses: actions/github-script@v8
         env:

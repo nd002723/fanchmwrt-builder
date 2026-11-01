@@ -83,6 +83,11 @@ def write_outputs(values: dict[str, str]) -> None:
     with open(output_path, "a", encoding="utf-8", newline="\n") as output:
         for key in REQUIRED_FIELDS:
             output.write(f"{key}={resolved if key == 'upstream_ref' else values[key]}\n")
+        # The release the requester picked and the override they typed, kept apart
+        # from the resolved ref: the build is dispatched with the resolved commit,
+        # and a SHA no longer says which release's device backports belong to it.
+        output.write(f"upstream_selection={values['upstream_ref']}\n")
+        output.write(f"upstream_override={values.get('upstream_ref_override', '')}\n")
 
 
 def main() -> None:
